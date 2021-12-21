@@ -5,9 +5,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-errors/errors"
-	"github.com/lightninglabs/aperture"
 	"github.com/lightninglabs/lightning-node-connect/gbn"
+
+	"github.com/lightninglabs/aperture"
+
+	"github.com/go-errors/errors"
 	"github.com/lightninglabs/lightning-node-connect/mailbox"
 	"github.com/lightningnetwork/lnd"
 	"github.com/lightningnetwork/lnd/build"

@@ -215,6 +215,18 @@ func (c *NoiseGrpcConn) ClientHandshake(_ context.Context, _ string,
 		return nil, nil, err
 	}
 
+	// If
+	if c.noise.remoteVersion == HandshakeVersion &&
+		c.noise.actFourSize > 0 {
+
+		actFour := make([]byte, c.noise.actFourSize)
+		if _, err := conn.Read(actFour); err != nil {
+			return nil, nil, err
+		}
+
+		c.noise.authData = actFour
+	}
+
 	// We'll reset the deadline as it's no longer critical beyond the
 	// initial handshake.
 	err = c.ProxyConn.SetReadDeadline(time.Time{})
@@ -307,6 +319,14 @@ func (c *NoiseGrpcConn) ServerHandshake(conn net.Conn) (net.Conn,
 	}
 	if err := c.noise.RecvActThree(actThree); err != nil {
 		return nil, nil, err
+	}
+
+	// If the initiator is on version 1, we send it authData before
+	// completing the handshake (if there is any authData to send).
+	if c.noise.remoteVersion == HandshakeVersion && len(c.authData) > 0 {
+		if _, err := conn.Write(c.authData); err != nil {
+			return nil, nil, err
+		}
 	}
 
 	// We'll reset the deadline as it's no longer critical beyond the

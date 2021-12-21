@@ -384,6 +384,14 @@ type Machine struct {
 
 	handshakeState
 
+	// remoteVersion is the handshake version that the remote party is
+	// using.
+	remoteVersion byte
+
+	// actFourSize is the size of the authData that the initiator should
+	// expect the responder to send in act four.
+	actFourSize uint32
+
 	// nextCipherHeader is a static buffer that we'll use to read in the
 	// next ciphertext header from the wire. The header is a 2 byte length
 	// (of the next ciphertext), followed by a 16 byte MAC.
@@ -489,10 +497,20 @@ func ekeUnmask(me *btcec.PublicKey, password []byte) *btcec.PublicKey {
 }
 
 const (
+	// HandshakeVersion0 is the handshake version that corresponds to
+	// the handshake where the authData is sent in act two instead of
+	// in act 4.
+	HandshakeVersion0 = byte(0)
+
+	// MinHandshakeVersion is the minimum handshake version that is
+	// currently supported.
+	MinHandshakeVersion = HandshakeVersion0
+
 	// HandshakeVersion is the expected version of the brontide handshake.
-	// Any messages that carry a different version will cause the handshake
+	// Any messages that carry a version that is not between
+	// MinHandshakeVersion and HandshakeVersion will cause the handshake
 	// to abort immediately.
-	HandshakeVersion = byte(0)
+	HandshakeVersion = byte(1)
 
 	// ActOneSize is the size of the packet sent from initiator to
 	// responder in ActOne. The packet consists of a handshake version, an
@@ -522,6 +540,10 @@ const (
 	//
 	// 1 + 33 + 16 + 16
 	ActThreeSize = 66
+
+	// lengthAuthDataSize is the number of bytes used to encode the number
+	// of bytes that will be included in the authData.
+	lengthAuthDataSize = 4
 )
 
 // GenActOne generates the initial packet (act one) to be sent from initiator
@@ -558,7 +580,7 @@ func (b *Machine) GenActOne() ([ActOneSize]byte, error) {
 
 	authPayload := b.EncryptAndHash([]byte{})
 
-	actOne[0] = HandshakeVersion
+	actOne[0] = MinHandshakeVersion
 	copy(actOne[1:34], maskedEphemeralBytes)
 	copy(actOne[34:], authPayload)
 
@@ -584,9 +606,13 @@ func (b *Machine) RecvActOne(actOne [ActOneSize]byte) error {
 	//
 	// TODO(roasbeef); use version to gate the initial and subsequent
 	// pairings
-	if actOne[0] != HandshakeVersion {
+	b.remoteVersion = actOne[0]
+	if b.remoteVersion < MinHandshakeVersion ||
+		b.remoteVersion > HandshakeVersion {
+
 		return fmt.Errorf("act one: invalid handshake version: %v, "+
-			"only %v is valid, msg=%x", actOne[0], HandshakeVersion,
+			"only versions between %v and %v are valid, msg=%x",
+			actOne[0], MinHandshakeVersion, HandshakeVersion,
 			actOne[:])
 	}
 
@@ -659,29 +685,25 @@ func (b *Machine) GenActTwo() ([ActTwoSize]byte, error) {
 	// At this point, we've authenticated the responder, and need to carry
 	// out the final step primarily to obtain their long-term public key
 	// and initialize the DH handshake.
-	//
-	// However, we also want to send the client data they may need for
-	// authentication (if present) encrypted with strong forward secrecy.
+
+	// We include the size of tha auth data that we will send along to the
+	// initiator in Act Four. This size is encoded in a static-size payload
+	// here in order to maintain backwards compatibility with handshake
+	// version 0. At this point in the handshake, the client still does not
+	// know which version the server is using and so won't know how many
+	// bytes to expect for Act 2 yet. Thus, we keep it the same size as in
+	// v0.
 	var payload [ActTwoPayloadSize]byte
-	if b.authData != nil {
-		// If we have an auth payload, then we'll write out 2 bytes
-		// that denotes the true length of the payload, followed by the
-		// payload itself.
-		var payloadWriter bytes.Buffer
 
-		var length [2]byte
-		payLoadlen := len(b.authData)
-		binary.BigEndian.PutUint16(length[:], uint16(payLoadlen))
+	var length [lengthAuthDataSize]byte
+	binary.BigEndian.PutUint32(length[:], uint32(len(b.authData)))
 
-		if _, err := payloadWriter.Write(length[:]); err != nil {
-			return actTwo, err
-		}
-		if _, err := payloadWriter.Write(b.authData); err != nil {
-			return actTwo, err
-		}
-
-		copy(payload[:], payloadWriter.Bytes())
+	var payloadWriter bytes.Buffer
+	if _, err := payloadWriter.Write(length[:]); err != nil {
+		return actTwo, err
 	}
+
+	copy(payload[:], payloadWriter.Bytes())
 
 	authPayload := b.EncryptAndHash(payload[:])
 
@@ -705,11 +727,16 @@ func (b *Machine) RecvActTwo(actTwo [ActTwoSize]byte) error {
 		p   [ActTwoPayloadSize + 16]byte
 	)
 
-	// If the handshake version is unknown, then the handshake fails
+	b.remoteVersion = actTwo[0]
+
+	// If the handshake version is not supported, then the handshake fails
 	// immediately.
-	if actTwo[0] != HandshakeVersion {
+	if b.remoteVersion < MinHandshakeVersion ||
+		b.remoteVersion > HandshakeVersion {
+
 		return fmt.Errorf("act two: invalid handshake version: %v, "+
-			"only %v is valid, msg=%x", actTwo[0], HandshakeVersion,
+			"only versions between %v and %v are valid, msg=%x",
+			actTwo[0], MinHandshakeVersion, HandshakeVersion,
 			actTwo[:])
 	}
 
@@ -761,12 +788,25 @@ func (b *Machine) RecvActTwo(actTwo [ActTwoSize]byte) error {
 		return err
 	}
 
-	payloadLen := binary.BigEndian.Uint16(payload[:2])
-	b.authData = make([]byte, payloadLen)
+	switch b.remoteVersion {
+	case HandshakeVersion0:
+		// In handshake version 0, the payload includes a 2 byte field
+		// describing the length of the authData to follow.
+		payloadLen := binary.BigEndian.Uint16(payload[:2])
+		b.authData = make([]byte, payloadLen)
 
-	payloadReader := bytes.NewReader(payload[2:])
-	if _, err := payloadReader.Read(b.authData); err != nil {
-		return err
+		payloadReader := bytes.NewReader(payload[2:])
+		if _, err = payloadReader.Read(b.authData); err != nil {
+			return err
+		}
+
+	default:
+
+		// In the latest handshake version, the payload only includes
+		// the size of the authData that will be sent along in act four.
+		b.actFourSize = binary.BigEndian.Uint32(
+			payload[:lengthAuthDataSize],
+		)
 	}
 
 	return err
@@ -795,7 +835,9 @@ func (b *Machine) GenActThree() ([ActThreeSize]byte, error) {
 
 	authPayload := b.EncryptAndHash([]byte{})
 
-	actThree[0] = HandshakeVersion
+	// At this point, the initiator agrees to the version that the responder
+	// sent in act two and so this version is used from here onwards.
+	actThree[0] = b.remoteVersion
 	copy(actThree[1:50], ciphertext)
 	copy(actThree[50:], authPayload)
 
@@ -819,10 +861,11 @@ func (b *Machine) RecvActThree(actThree [ActThreeSize]byte) error {
 
 	// If the handshake version is unknown, then the handshake fails
 	// immediately.
-	if actThree[0] != HandshakeVersion {
+	b.remoteVersion = actThree[0]
+	if b.remoteVersion != HandshakeVersion {
 		return fmt.Errorf("act three: invalid handshake version: %v, "+
-			"only %v is valid, msg=%x", actThree[0], HandshakeVersion,
-			actThree[:])
+			"only %v is valid, msg=%x", actThree[0],
+			HandshakeVersion, actThree[:])
 	}
 
 	copy(s[:], actThree[1:33+16+1])
