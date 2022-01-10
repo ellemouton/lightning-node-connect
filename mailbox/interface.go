@@ -18,7 +18,7 @@ const (
 	// encrypted communication.
 	ProtocolName = "XXeke_secp256k1+SPAKE2_CHACHAPOLY1305_SHA256"
 
-	// ProtocolVersion is the version of the protocol used for the encrypted
+	// ProtocolVersion is the handshakeVersion of the protocol used for the encrypted
 	// communication.
 	ProtocolVersion = 0
 )
@@ -202,12 +202,12 @@ type MsgData struct {
 	Payload []byte
 }
 
-// NewMsgData creates a new MsgData message with the given version and payload.
+// NewMsgData creates a new MsgData message with the given handshakeVersion and payload.
 func NewMsgData(version uint8, payload []byte) *MsgData {
 	return &MsgData{version: version, Payload: payload}
 }
 
-// ProtocolVersion returns the protocol version used with this message.
+// ProtocolVersion returns the protocol handshakeVersion used with this message.
 //
 // NOTE: This is part of the ControlMsg interface.
 func (m *MsgData) ProtocolVersion() uint8 {

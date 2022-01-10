@@ -2,6 +2,7 @@ package mailbox
 
 import (
 	"bytes"
+	"crypto/rand"
 	"crypto/sha256"
 	"github.com/lightningnetwork/lnd/keychain"
 	"net"
@@ -33,14 +34,16 @@ func TestSpake2Mask(t *testing.T) {
 }
 
 func TestHandshake(t *testing.T) {
+	largeAuthData := make([]byte, 20*1024*1024)
+	_, err := rand.Read(largeAuthData)
+	require.NoError(t, err)
+
 	tests := []struct {
 		name                 string
 		serverMinVersion     byte
 		serverCurrentVersion byte
 		clientMinVersion     byte
 		clientCurrentVersion byte
-		expectClientErr      bool
-		expectServerErr      bool
 		authData             []byte
 	}{
 		{
@@ -50,6 +53,30 @@ func TestHandshake(t *testing.T) {
 			clientMinVersion:     HandshakeVersion0,
 			clientCurrentVersion: HandshakeVersion0,
 			authData:             []byte{0, 1, 2, 3},
+		},
+		{
+			name:                 "server and client v1",
+			serverMinVersion:     HandshakeVersion1,
+			serverCurrentVersion: HandshakeVersion1,
+			clientMinVersion:     HandshakeVersion1,
+			clientCurrentVersion: HandshakeVersion1,
+			authData:             largeAuthData,
+		},
+		{
+			name:                 "server v0 and client v1",
+			serverMinVersion:     HandshakeVersion0,
+			serverCurrentVersion: HandshakeVersion0,
+			clientMinVersion:     HandshakeVersion0,
+			clientCurrentVersion: HandshakeVersion1,
+			authData:             []byte{0, 1, 2, 3},
+		},
+		{
+			name:                 "server v1 and client [v0,v1]",
+			serverMinVersion:     HandshakeVersion0,
+			serverCurrentVersion: HandshakeVersion1,
+			clientMinVersion:     HandshakeVersion0,
+			clientCurrentVersion: HandshakeVersion1,
+			authData:             largeAuthData,
 		},
 	}
 
@@ -65,7 +92,7 @@ func TestHandshake(t *testing.T) {
 				&keychain.PrivKeyECDH{PrivKey: pk1},
 				test.authData, pass,
 				WithMinHandshakeVersion(test.serverMinVersion),
-				WithCurrentHandshakeVersion(
+				WithMaxHandshakeVersion(
 					test.serverCurrentVersion,
 				),
 			)
@@ -73,7 +100,7 @@ func TestHandshake(t *testing.T) {
 			client := NewNoiseGrpcConn(
 				&keychain.PrivKeyECDH{PrivKey: pk2}, nil, pass,
 				WithMinHandshakeVersion(test.clientMinVersion),
-				WithCurrentHandshakeVersion(
+				WithMaxHandshakeVersion(
 					test.clientCurrentVersion,
 				),
 			)
@@ -141,11 +168,11 @@ type mockProxyConn struct {
 	net.Conn
 }
 
-func (m *mockProxyConn) ReceiveControlMsg(msg ControlMsg) error {
+func (m *mockProxyConn) ReceiveControlMsg(_ ControlMsg) error {
 	return nil
 }
 
-func (m *mockProxyConn) SendControlMsg(msg ControlMsg) error {
+func (m *mockProxyConn) SendControlMsg(_ ControlMsg) error {
 	return nil
 }
 

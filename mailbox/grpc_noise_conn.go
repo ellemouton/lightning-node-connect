@@ -40,8 +40,8 @@ type NoiseGrpcConn struct {
 
 	noise *Machine
 
-	minHandshakeVersion     byte
-	currentHandshakeVersion byte
+	minHandshakeVersion byte
+	maxHandshakeVersion byte
 }
 
 // NewNoiseGrpcConn creates a new noise connection using given local ECDH key.
@@ -52,11 +52,11 @@ func NewNoiseGrpcConn(localKey keychain.SingleKeyECDH,
 	options ...func(conn *NoiseGrpcConn)) *NoiseGrpcConn {
 
 	conn := &NoiseGrpcConn{
-		localKey:                localKey,
-		authData:                authData,
-		password:                password,
-		minHandshakeVersion:     MinHandshakeVersion,
-		currentHandshakeVersion: CurrentHandshakeVersion,
+		localKey:            localKey,
+		authData:            authData,
+		password:            password,
+		minHandshakeVersion: MinHandshakeVersion,
+		maxHandshakeVersion: MaxHandshakeVersion,
 	}
 
 	for _, opt := range options {
@@ -67,18 +67,18 @@ func NewNoiseGrpcConn(localKey keychain.SingleKeyECDH,
 }
 
 // WithMinHandshakeVersion is a functional option used to set the minimum
-// handshake supported.
+// handshake version supported.
 func WithMinHandshakeVersion(version byte) func(*NoiseGrpcConn) {
 	return func(conn *NoiseGrpcConn) {
 		conn.minHandshakeVersion = version
 	}
 }
 
-// WithCurrentHandshakeVersion is a functional option used to set the preferred
-// handshake version. It is also the maximum compatible version.
-func WithCurrentHandshakeVersion(version byte) func(*NoiseGrpcConn) {
+// WithMaxHandshakeVersion is a functional option used to set the maximum
+// handshake version supported.
+func WithMaxHandshakeVersion(version byte) func(*NoiseGrpcConn) {
 	return func(conn *NoiseGrpcConn) {
-		conn.currentHandshakeVersion = version
+		conn.maxHandshakeVersion = version
 	}
 }
 
@@ -197,7 +197,7 @@ func (c *NoiseGrpcConn) ClientHandshake(_ context.Context, _ string,
 	var err error
 	c.noise, err = NewBrontideMachine(
 		true, c.localKey, c.password, c.minHandshakeVersion,
-		c.currentHandshakeVersion,
+		c.maxHandshakeVersion,
 	)
 	if err != nil {
 		return nil, nil, err
@@ -246,6 +246,15 @@ func (c *NoiseGrpcConn) ClientHandshake(_ context.Context, _ string,
 		return nil, nil, err
 	}
 
+	if c.noise.handshakeVersion > HandshakeVersion0 {
+		authData, err := c.noise.ReadMessage(c.ProxyConn)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		c.noise.authData = authData
+	}
+
 	// We'll reset the deadline as it's no longer critical beyond the
 	// initial handshake.
 	err = c.ProxyConn.SetReadDeadline(time.Time{})
@@ -256,8 +265,6 @@ func (c *NoiseGrpcConn) ClientHandshake(_ context.Context, _ string,
 	log.Debugf("Completed client handshake with with server_key=%x",
 		c.noise.remoteStatic.SerializeCompressed())
 
-	// At this point, we'll also extract the auth data obtained during the
-	// second act of the handshake.
 	c.authData = c.noise.authData
 
 	log.Tracef("Client handshake completed")
@@ -287,7 +294,7 @@ func (c *NoiseGrpcConn) ServerHandshake(conn net.Conn) (net.Conn,
 	var err error
 	c.noise, err = NewBrontideMachine(
 		false, c.localKey, c.password, c.minHandshakeVersion,
-		c.currentHandshakeVersion, AuthDataPayload(c.authData),
+		c.maxHandshakeVersion, AuthDataPayload(c.authData),
 	)
 	if err != nil {
 		return nil, nil, err
@@ -339,6 +346,16 @@ func (c *NoiseGrpcConn) ServerHandshake(conn net.Conn) (net.Conn,
 	}
 	if err := c.noise.RecvActThree(actThree); err != nil {
 		return nil, nil, err
+	}
+
+	if c.noise.handshakeVersion > HandshakeVersion0 {
+		if err := c.noise.WriteMessage(c.authData); err != nil {
+			return nil, nil, err
+		}
+
+		if _, err := c.noise.Flush(c.ProxyConn); err != nil {
+			return nil, nil, err
+		}
 	}
 
 	// We'll reset the deadline as it's no longer critical beyond the

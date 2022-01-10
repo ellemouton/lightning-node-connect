@@ -394,7 +394,7 @@ var flushTests = []flushTest{
 		chunks: []flushChunk{
 			// Write 18-byte header in two parts, 16 then 2.
 			{
-				errAfter: encHeaderSize - 2,
+				errAfter: encHeaderSizeV0 - 2,
 				expN:     0,
 				expErr:   iotest.ErrTimeout,
 			},
@@ -415,7 +415,7 @@ var flushTests = []flushTest{
 		chunks: []flushChunk{
 			// Write entire header and entire payload w/o MAC.
 			{
-				errAfter: encHeaderSize + payloadSize,
+				errAfter: encHeaderSizeV0 + payloadSize,
 				expN:     payloadSize,
 				expErr:   iotest.ErrTimeout,
 			},
@@ -431,7 +431,7 @@ var flushTests = []flushTest{
 		chunks: []flushChunk{
 			// Write header and all but last byte of payload.
 			{
-				errAfter: encHeaderSize + payloadSize - 1,
+				errAfter: encHeaderSizeV0 + payloadSize - 1,
 				expN:     payloadSize - 1,
 				expErr:   iotest.ErrTimeout,
 			},

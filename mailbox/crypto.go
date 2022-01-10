@@ -26,7 +26,7 @@ const (
 
 var (
 	// Below are the default scrypt parameters that are tied to the initial
-	// version 0 of the noise handshake.
+	// handshakeVersion 0 of the noise handshake.
 	scryptN = 1 << 16 // 65536
 	scryptR = 8
 	scryptP = 1

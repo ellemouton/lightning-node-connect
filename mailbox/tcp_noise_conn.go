@@ -46,7 +46,7 @@ func Dial(localPriv keychain.SingleKeyECDH, netAddr net.Addr, passphrase []byte,
 
 	noise, err := NewBrontideMachine(
 		true, localPriv, passphrase, MinHandshakeVersion,
-		CurrentHandshakeVersion,
+		MaxHandshakeVersion,
 	)
 	if err != nil {
 		return nil, err
@@ -102,6 +102,16 @@ func Dial(localPriv keychain.SingleKeyECDH, netAddr net.Addr, passphrase []byte,
 	if _, err := conn.Write(actThree[:]); err != nil {
 		b.conn.Close()
 		return nil, err
+	}
+
+	if b.noise.handshakeVersion > HandshakeVersion0 {
+		authData, err := b.noise.ReadMessage(conn)
+		if err != nil {
+			b.conn.Close()
+			return nil, err
+		}
+
+		b.noise.authData = authData
 	}
 
 	// We'll reset the deadline as it's no longer critical beyond the

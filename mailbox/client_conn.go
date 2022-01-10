@@ -18,12 +18,12 @@ import (
 var (
 	// receivePath is the URL under which the read stream of the mailbox
 	// server's WebSocket proxy is reachable. We keep this under the old
-	// name to make the version backward compatible with the closed beta.
+	// name to make the handshakeVersion backward compatible with the closed beta.
 	receivePath = "/v1/lightning-node-connect/hashmail/receive"
 
 	// sendPath is the URL under which the write stream of the mailbox
 	// server's WebSocket proxy is reachable. We keep this under the old
-	// name to make the version backward compatible with the closed beta.
+	// name to make the handshakeVersion backward compatible with the closed beta.
 	sendPath   = "/v1/lightning-node-connect/hashmail/send"
 	addrFormat = "wss://%s%s?method=POST"
 

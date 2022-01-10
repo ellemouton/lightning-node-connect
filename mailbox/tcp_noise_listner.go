@@ -116,7 +116,7 @@ func (l *Listener) doHandshake(conn net.Conn) {
 
 	noise, err := NewBrontideMachine(
 		false, l.localStatic, l.passphrase, MinHandshakeVersion,
-		CurrentHandshakeVersion, AuthDataPayload(l.authData),
+		MaxHandshakeVersion, AuthDataPayload(l.authData),
 	)
 	if err != nil {
 		l.rejectConn(rejectedConnErr(err, remoteAddr))
@@ -195,6 +195,24 @@ func (l *Listener) doHandshake(conn net.Conn) {
 		brontideConn.conn.Close()
 		l.rejectConn(rejectedConnErr(err, remoteAddr))
 		return
+	}
+
+	if brontideConn.noise.handshakeVersion > HandshakeVersion0 {
+		err := brontideConn.noise.WriteMessage(
+			brontideConn.noise.authData,
+		)
+		if err != nil {
+			brontideConn.conn.Close()
+			l.rejectConn(rejectedConnErr(err, remoteAddr))
+			return
+		}
+
+		_, err = brontideConn.noise.Flush(brontideConn.conn)
+		if err != nil {
+			brontideConn.conn.Close()
+			l.rejectConn(rejectedConnErr(err, remoteAddr))
+			return
+		}
 	}
 
 	// We'll reset the deadline as it's no longer critical beyond the
