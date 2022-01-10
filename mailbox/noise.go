@@ -384,6 +384,9 @@ type Machine struct {
 
 	handshakeState
 
+	minHandshakeVersion     byte
+	currentHandshakeVersion byte
+
 	// nextCipherHeader is a static buffer that we'll use to read in the
 	// next ciphertext header from the wire. The header is a 2 byte length
 	// (of the next ciphertext), followed by a 16 byte MAC.
@@ -419,7 +422,8 @@ type Machine struct {
 // arguments for adding additional options to the brontide Machine
 // initialization.
 func NewBrontideMachine(initiator bool, localPub keychain.SingleKeyECDH,
-	passphrase []byte, options ...func(*Machine)) (*Machine, error) {
+	passphrase []byte, minVersion, currentVersion byte,
+	options ...func(*Machine)) (*Machine, error) {
 
 	handshake := newHandshakeState(
 		initiator, lightningNodeConnectPrologue, localPub,
@@ -434,9 +438,11 @@ func NewBrontideMachine(initiator bool, localPub keychain.SingleKeyECDH,
 	}
 
 	m := &Machine{
-		handshakeState: handshake,
-		ephemeralGen:   ephemeralGen,
-		password:       password,
+		handshakeState:          handshake,
+		ephemeralGen:            ephemeralGen,
+		password:                password,
+		minHandshakeVersion:     minVersion,
+		currentHandshakeVersion: currentVersion,
 	}
 
 	// With the default options established, we'll now process all the
@@ -489,10 +495,19 @@ func ekeUnmask(me *btcec.PublicKey, password []byte) *btcec.PublicKey {
 }
 
 const (
-	// HandshakeVersion is the expected version of the brontide handshake.
-	// Any messages that carry a different version will cause the handshake
-	// to abort immediately.
-	HandshakeVersion = byte(0)
+	// HandshakeVersion0 is the version where the authData is sent in
+	// act two instead of in act 4.
+	HandshakeVersion0 = byte(0)
+
+	// MinHandshakeVersion is the minimum handshake version that is
+	// currently supported.
+	MinHandshakeVersion = HandshakeVersion0
+
+	// CurrentHandshakeVersion is the maximum handshake that we currently
+	// support. Any messages that carry a version not between
+	// MinHandshakeVersion and CurrentHandshakeVersion will cause the
+	// handshake to abort immediately.
+	CurrentHandshakeVersion = HandshakeVersion0
 
 	// ActOneSize is the size of the packet sent from initiator to
 	// responder in ActOne. The packet consists of a handshake version, an
@@ -558,7 +573,9 @@ func (b *Machine) GenActOne() ([ActOneSize]byte, error) {
 
 	authPayload := b.EncryptAndHash([]byte{})
 
-	actOne[0] = HandshakeVersion
+	// The initiator sends the minimum handshake version that it will
+	// accept.
+	actOne[0] = b.minHandshakeVersion
 	copy(actOne[1:34], maskedEphemeralBytes)
 	copy(actOne[34:], authPayload)
 
@@ -579,15 +596,15 @@ func (b *Machine) RecvActOne(actOne [ActOneSize]byte) error {
 		p   [16]byte
 	)
 
-	// If the handshake version is unknown, then the handshake fails
-	// immediately.
-	//
-	// TODO(roasbeef); use version to gate the initial and subsequent
-	// pairings
-	if actOne[0] != HandshakeVersion {
+	// If the handshake version is unknown or no longer supported, then the
+	// handshake fails immediately.
+	if actOne[0] < b.minHandshakeVersion ||
+		actOne[0] > b.currentHandshakeVersion {
+
 		return fmt.Errorf("act one: invalid handshake version: %v, "+
-			"only %v is valid, msg=%x", actOne[0], HandshakeVersion,
-			actOne[:])
+			"only versions between %v and %v are valid, msg=%x",
+			actOne[0], b.minHandshakeVersion,
+			b.currentHandshakeVersion, actOne[:])
 	}
 
 	copy(e[:], actOne[1:34])
@@ -685,7 +702,10 @@ func (b *Machine) GenActTwo() ([ActTwoSize]byte, error) {
 
 	authPayload := b.EncryptAndHash(payload[:])
 
-	actTwo[0] = HandshakeVersion
+	// The responder will always send the maximum handshake version that
+	// it supports in the hopes that the initiator will then upgrade to
+	// this version in act 3.
+	actTwo[0] = b.currentHandshakeVersion
 	copy(actTwo[1:34], ephemeral)
 	copy(actTwo[34:], ciphertext)
 	copy(actTwo[83:], authPayload)
@@ -707,11 +727,19 @@ func (b *Machine) RecvActTwo(actTwo [ActTwoSize]byte) error {
 
 	// If the handshake version is unknown, then the handshake fails
 	// immediately.
-	if actTwo[0] != HandshakeVersion {
+	responderVersion := actTwo[0]
+	if responderVersion < b.minHandshakeVersion ||
+		responderVersion > b.currentHandshakeVersion {
+
 		return fmt.Errorf("act two: invalid handshake version: %v, "+
-			"only %v is valid, msg=%x", actTwo[0], HandshakeVersion,
-			actTwo[:])
+			"only versions between %v and %v are valid, msg=%x",
+			responderVersion, b.minHandshakeVersion,
+			b.currentHandshakeVersion, actTwo[:])
 	}
+
+	// The version that the responder sent over is the latest version that
+	// they support, so we will continue with this version.
+	b.currentHandshakeVersion = responderVersion
 
 	copy(e[:], actTwo[1:34])
 	copy(s[:], actTwo[34:83])
@@ -795,7 +823,7 @@ func (b *Machine) GenActThree() ([ActThreeSize]byte, error) {
 
 	authPayload := b.EncryptAndHash([]byte{})
 
-	actThree[0] = HandshakeVersion
+	actThree[0] = b.currentHandshakeVersion
 	copy(actThree[1:50], ciphertext)
 	copy(actThree[50:], authPayload)
 
@@ -818,11 +846,12 @@ func (b *Machine) RecvActThree(actThree [ActThreeSize]byte) error {
 	)
 
 	// If the handshake version is unknown, then the handshake fails
-	// immediately.
-	if actThree[0] != HandshakeVersion {
+	// immediately. At this point, we expect the initiator to agree with
+	// our current handshake version that we sent over in act 2.
+	if actThree[0] != b.currentHandshakeVersion {
 		return fmt.Errorf("act three: invalid handshake version: %v, "+
-			"only %v is valid, msg=%x", actThree[0], HandshakeVersion,
-			actThree[:])
+			"only %v is valid, msg=%x", actThree[0],
+			b.currentHandshakeVersion, actThree[:])
 	}
 
 	copy(s[:], actThree[1:33+16+1])
