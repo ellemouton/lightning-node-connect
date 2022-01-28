@@ -6,6 +6,8 @@ import (
 	"crypto/tls"
 	"net/http"
 
+	"github.com/lightninglabs/lightning-node-connect/noise"
+
 	"github.com/lightninglabs/lightning-node-connect/itest/mockrpc"
 
 	"github.com/btcsuite/btcd/btcec"
@@ -43,8 +45,8 @@ func (c *clientHarness) setConn(words []string) error {
 	ecdh := &keychain.PrivKeyECDH{PrivKey: privKey}
 
 	ctx := context.Background()
-	transportConn := mailbox.NewClientConn(ctx, receiveSID, sendSID)
-	noiseConn := mailbox.NewNoiseGrpcConn(ecdh, nil, password[:])
+	transportConn := noise.NewClientConn(ctx, receiveSID, sendSID)
+	noiseConn := noise.NewNoiseGrpcConn(ecdh, nil, nil, password[:])
 
 	dialOpts := []grpc.DialOption{
 		grpc.WithContextDialer(transportConn.Dial),

@@ -5,10 +5,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lightninglabs/lightning-node-connect/noise"
+
 	"github.com/go-errors/errors"
 	"github.com/lightninglabs/aperture"
 	"github.com/lightninglabs/lightning-node-connect/gbn"
-	"github.com/lightninglabs/lightning-node-connect/mailbox"
 	"github.com/lightningnetwork/lnd"
 	"github.com/lightningnetwork/lnd/build"
 	"github.com/lightningnetwork/lnd/signal"
@@ -102,7 +103,7 @@ func (h *harnessTest) setupLogging() {
 	require.NoError(h.t, err)
 
 	aperture.SetupLoggers(logWriter, interceptor)
-	lnd.AddSubLogger(logWriter, mailbox.Subsystem, interceptor, mailbox.UseLogger)
+	lnd.AddSubLogger(logWriter, noise.Subsystem, interceptor, noise.UseLogger)
 	lnd.AddSubLogger(logWriter, gbn.Subsystem, interceptor, gbn.UseLogger)
 
 	err = build.ParseAndSetDebugLevels("debug,PRXY=warn", logWriter)

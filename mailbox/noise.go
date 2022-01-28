@@ -111,7 +111,7 @@ type cipherState struct {
 
 // Encrypt returns a ciphertext which is the encryption of the plainText
 // observing the passed associatedData within the AEAD construction.
-func (c *cipherState) Encrypt(associatedData, cipherText, plainText []byte) []byte {
+func (c *cipherState) Encrypt(associatedData, plainText []byte) []byte {
 	defer func() {
 		c.nonce++
 
@@ -125,13 +125,15 @@ func (c *cipherState) Encrypt(associatedData, cipherText, plainText []byte) []by
 
 	// TODO(roasbeef): should just return plaintext?
 
-	return c.cipher.Seal(cipherText, nonce[:], plainText, associatedData)
+	return c.cipher.Seal(nil, nonce[:], plainText, associatedData)
 }
 
 // Decrypt attempts to decrypt the passed ciphertext observing the specified
 // associatedData within the AEAD construction. In the case that the final MAC
 // check fails, then a non-nil error will be returned.
-func (c *cipherState) Decrypt(associatedData, plainText, cipherText []byte) ([]byte, error) {
+func (c *cipherState) Decrypt(associatedData, cipherText []byte) ([]byte,
+	error) {
+
 	defer func() {
 		c.nonce++
 
@@ -143,7 +145,7 @@ func (c *cipherState) Decrypt(associatedData, plainText, cipherText []byte) ([]b
 	var nonce [12]byte
 	binary.LittleEndian.PutUint64(nonce[4:], c.nonce)
 
-	return c.cipher.Open(plainText, nonce[:], cipherText, associatedData)
+	return c.cipher.Open(nil, nonce[:], cipherText, associatedData)
 }
 
 // InitializeKey initializes the secret key and AEAD cipher scheme based off of
@@ -252,7 +254,7 @@ func (s *symmetricState) mixHash(data []byte) {
 // When encrypting the handshake digest (h) is used as the associated data to
 // the AEAD cipher.
 func (s *symmetricState) EncryptAndHash(plaintext []byte) []byte {
-	ciphertext := s.Encrypt(s.handshakeDigest[:], nil, plaintext)
+	ciphertext := s.Encrypt(s.handshakeDigest[:], plaintext)
 
 	s.mixHash(ciphertext)
 
@@ -263,7 +265,7 @@ func (s *symmetricState) EncryptAndHash(plaintext []byte) []byte {
 // ciphertext.  When encrypting the handshake digest (h) is used as the
 // associated data to the AEAD cipher.
 func (s *symmetricState) DecryptAndHash(ciphertext []byte) ([]byte, error) {
-	plaintext, err := s.Decrypt(s.handshakeDigest[:], nil, ciphertext)
+	plaintext, err := s.Decrypt(s.handshakeDigest[:], ciphertext)
 	if err != nil {
 		return nil, err
 	}
@@ -921,10 +923,10 @@ func (b *Machine) WriteMessage(p []byte) error {
 	binary.BigEndian.PutUint16(pktLen[:], fullLength)
 
 	// First, generate the encrypted+MAC'd length prefix for the packet.
-	b.nextHeaderSend = b.sendCipher.Encrypt(nil, nil, pktLen[:])
+	b.nextHeaderSend = b.sendCipher.Encrypt(nil, pktLen[:])
 
 	// Finally, generate the encrypted packet itself.
-	b.nextBodySend = b.sendCipher.Encrypt(nil, nil, p)
+	b.nextBodySend = b.sendCipher.Encrypt(nil, p)
 
 	return nil
 }
@@ -1035,9 +1037,7 @@ func (b *Machine) ReadHeader(r io.Reader) (uint32, error) {
 	}
 
 	// Attempt to decrypt+auth the packet length present in the stream.
-	pktLenBytes, err := b.recvCipher.Decrypt(
-		nil, nil, b.nextCipherHeader[:],
-	)
+	pktLenBytes, err := b.recvCipher.Decrypt(nil, b.nextCipherHeader[:])
 	if err != nil {
 		return 0, err
 	}
@@ -1064,5 +1064,5 @@ func (b *Machine) ReadBody(r io.Reader, buf []byte) ([]byte, error) {
 	// Finally, decrypt the message held in the buffer, and return a
 	// new byte slice containing the plaintext.
 	// TODO(roasbeef): modify to let pass in slice
-	return b.recvCipher.Decrypt(nil, nil, buf)
+	return b.recvCipher.Decrypt(nil, buf)
 }

@@ -4,6 +4,8 @@ import (
 	"crypto/tls"
 	"sync"
 
+	"github.com/lightninglabs/lightning-node-connect/noise"
+
 	"github.com/lightninglabs/lightning-node-connect/itest/mockrpc"
 
 	"github.com/btcsuite/btcd/btcec"
@@ -48,7 +50,7 @@ func (s *serverHarness) start() error {
 		return err
 	}
 
-	mailboxServer, err := mailbox.NewServer(
+	mailboxServer, err := noise.NewServer(
 		s.serverHost, passwordEntropy[:], grpc.WithTransportCredentials(
 			credentials.NewTLS(&tls.Config{
 				InsecureSkipVerify: true,
@@ -60,7 +62,8 @@ func (s *serverHarness) start() error {
 	}
 
 	ecdh := &keychain.PrivKeyECDH{PrivKey: privKey}
-	noiseConn := mailbox.NewNoiseGrpcConn(ecdh, nil, passwordEntropy[:])
+	//noiseConn := mailbox.NewNoiseGrpcConn(ecdh, nil, passwordEntropy[:])
+	noiseConn := noise.NewNoiseGrpcConn(ecdh, nil, nil, passwordEntropy[:])
 
 	s.mockServer = grpc.NewServer(
 		grpc.Creds(noiseConn),
