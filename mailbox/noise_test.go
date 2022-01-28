@@ -103,6 +103,10 @@ func TestXXHandshake(t *testing.T) {
 	// Ensure that any auth data was successfully received by the client.
 	require.True(t, bytes.Equal(client.authData, authData))
 
+	// Also check that both parties now have the other parties static key.
+	require.True(t, client.remoteKey.IsEqual(pk1.PubKey()))
+	require.True(t, server.remoteKey.IsEqual(pk2.PubKey()))
+
 	// Check that messages can be sent between client and server normally
 	// now.
 	testMessage := []byte("test message")
@@ -115,6 +119,83 @@ func TestXXHandshake(t *testing.T) {
 	_, err = serverConn.Read(recvBuffer)
 	require.NoError(t, err)
 	require.True(t, bytes.Equal(recvBuffer, testMessage))
+}
+
+// TestKKHandshake tests that a client and server Machine can successfully
+// complete a Noise_KK pattern handshake.
+func TestKKHandshake(t *testing.T) {
+	// First, generate static keys for each party.
+	pk1, err := btcec.NewPrivateKey(btcec.S256())
+	require.NoError(t, err)
+
+	pk2, err := btcec.NewPrivateKey(btcec.S256())
+	require.NoError(t, err)
+
+	// Create a password that will be used to mask the first ephemeral key.
+	pass := []byte("top secret")
+	passHash := sha256.Sum256(pass)
+
+	// The server will be initialised with auth data that it is expected to
+	// send to the client during act 2 of the handshake.
+	authData := []byte("authData")
+
+	// Create a pipe and give one end to the client and one to the server
+	// as the underlying transport.
+	conn1, conn2 := newMockProxyConns()
+	defer func() {
+		conn1.Close()
+		conn2.Close()
+	}()
+
+	// First, we'll initialize a new state machine for the server with our
+	// static key, remote static key, passphrase, and also the
+	// authentication data.
+	server, err := NewBrontideMachine(
+		false, KKPattern, &keychain.PrivKeyECDH{PrivKey: pk1},
+		pk2.PubKey(), passHash[:], authData, HandshakeVersion,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Spin off the server's handshake process.
+	var serverErrChan = make(chan error)
+	go func() {
+		err := server.DoHandshake(conn1)
+		serverErrChan <- err
+	}()
+
+	// Create a client.
+	client, err := NewBrontideMachine(
+		true, KKPattern, &keychain.PrivKeyECDH{PrivKey: pk2},
+		pk1.PubKey(), passHash[:], nil, HandshakeVersion,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Start the client's handshake process.
+	if err := client.DoHandshake(conn2); err != nil {
+		t.Fatal(err)
+	}
+
+	// Wait for the server's handshake to complete or timeout.
+	select {
+	case err := <-serverErrChan:
+		if err != nil {
+			t.Fatal(err)
+		}
+
+	case <-time.After(time.Second):
+		t.Fatalf("handshake timeout")
+	}
+
+	// Ensure that any auth data was successfully received by the client.
+	require.True(t, bytes.Equal(client.receivedPayload, authData))
+
+	// Also check that both parties now have the other parties static key.
+	require.True(t, client.remoteStatic.IsEqual(pk1.PubKey()))
+	require.True(t, server.remoteStatic.IsEqual(pk2.PubKey()))
 }
 
 var _ ProxyConn = (*mockProxyConn)(nil)
