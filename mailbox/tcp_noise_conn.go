@@ -45,7 +45,7 @@ func Dial(localPriv keychain.SingleKeyECDH, netAddr net.Addr, passphrase []byte,
 
 	noise, err := NewBrontideMachine(
 		true, XXPattern, localPriv, nil, passphrase, nil,
-		HandshakeVersion,
+		MinHandshakeVersion, MaxHandshakeVersion,
 	)
 	if err != nil {
 		return nil, err

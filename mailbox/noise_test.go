@@ -152,7 +152,8 @@ func TestKKHandshake(t *testing.T) {
 	// authentication data.
 	server, err := NewBrontideMachine(
 		false, KKPattern, &keychain.PrivKeyECDH{PrivKey: pk1},
-		pk2.PubKey(), passHash[:], authData, HandshakeVersion,
+		pk2.PubKey(), passHash[:], authData, MinHandshakeVersion,
+		MaxHandshakeVersion,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -168,7 +169,8 @@ func TestKKHandshake(t *testing.T) {
 	// Create a client.
 	client, err := NewBrontideMachine(
 		true, KKPattern, &keychain.PrivKeyECDH{PrivKey: pk2},
-		pk1.PubKey(), passHash[:], nil, HandshakeVersion,
+		pk1.PubKey(), passHash[:], nil, MinHandshakeVersion,
+		MaxHandshakeVersion,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -196,6 +198,106 @@ func TestKKHandshake(t *testing.T) {
 	// Also check that both parties now have the other parties static key.
 	require.True(t, client.remoteStatic.IsEqual(pk1.PubKey()))
 	require.True(t, server.remoteStatic.IsEqual(pk2.PubKey()))
+}
+
+// TestHandshake tests that client and server are able successfully perform
+// a handshake.
+func TestHandshake(t *testing.T) {
+	tests := []struct {
+		name             string
+		serverMinVersion byte
+		serverMaxVersion byte
+		clientMinVersion byte
+		clientMaxVersion byte
+		authData         []byte
+	}{
+		{
+			name:             "server v0 and client v0",
+			serverMinVersion: HandshakeVersion0,
+			serverMaxVersion: HandshakeVersion0,
+			clientMinVersion: HandshakeVersion0,
+			clientMaxVersion: HandshakeVersion0,
+			authData:         []byte{0, 1, 2, 3},
+		},
+	}
+
+	pk1, err := btcec.NewPrivateKey(btcec.S256())
+	require.NoError(t, err)
+
+	pk2, err := btcec.NewPrivateKey(btcec.S256())
+	require.NoError(t, err)
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			server := NewNoiseGrpcConn(
+				&keychain.PrivKeyECDH{PrivKey: pk1},
+				test.authData, pass,
+				WithMinHandshakeVersion(test.serverMinVersion),
+				WithMaxHandshakeVersion(test.serverMaxVersion),
+			)
+
+			client := NewNoiseGrpcConn(
+				&keychain.PrivKeyECDH{PrivKey: pk2}, nil, pass,
+				WithMinHandshakeVersion(test.clientMinVersion),
+				WithMaxHandshakeVersion(test.clientMaxVersion),
+			)
+
+			conn1, conn2 := newMockProxyConns()
+			defer func() {
+				conn1.Close()
+				conn2.Close()
+			}()
+
+			var (
+				serverConn net.Conn
+			)
+			serverErrChan := make(chan error)
+			go func() {
+				var err error
+				serverConn, _, err = server.ServerHandshake(
+					conn1,
+				)
+				serverErrChan <- err
+			}()
+
+			clientConn, _, err := client.ClientHandshake(
+				context.Background(), "", conn2,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			select {
+			case err := <-serverErrChan:
+				if err != nil {
+					t.Fatal(err)
+				}
+
+			case <-time.After(time.Second):
+				t.Fatalf("handshake timeout")
+			}
+
+			// Ensure that any auth data was successfully received
+			// by the client.
+			require.True(
+				t, bytes.Equal(client.authData, test.authData),
+			)
+
+			// Check that messages can be sent between client and
+			// server normally now.
+			testMessage := []byte("test message")
+			go func() {
+				_, err := clientConn.Write(testMessage)
+				require.NoError(t, err)
+			}()
+
+			recvBuffer := make([]byte, len(testMessage))
+			_, err = serverConn.Read(recvBuffer)
+			require.NoError(t, err)
+			require.True(t, bytes.Equal(recvBuffer, testMessage))
+		})
+	}
 }
 
 var _ ProxyConn = (*mockProxyConn)(nil)

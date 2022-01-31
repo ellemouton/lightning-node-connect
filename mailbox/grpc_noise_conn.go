@@ -38,18 +38,46 @@ type NoiseGrpcConn struct {
 	nextMsgMtx sync.Mutex
 
 	noise *Machine
+
+	minHandshakeVersion byte
+	maxHandshakeVersion byte
 }
 
 // NewNoiseGrpcConn creates a new noise connection using given local ECDH key.
 // The auth data can be set for server connections and is sent as the payload
 // to the client during the handshake.
 func NewNoiseGrpcConn(localKey keychain.SingleKeyECDH,
-	authData []byte, password []byte) *NoiseGrpcConn {
+	authData []byte, password []byte,
+	options ...func(conn *NoiseGrpcConn)) *NoiseGrpcConn {
 
-	return &NoiseGrpcConn{
-		localKey: localKey,
-		authData: authData,
-		password: password,
+	conn := &NoiseGrpcConn{
+		localKey:            localKey,
+		authData:            authData,
+		password:            password,
+		minHandshakeVersion: MinHandshakeVersion,
+		maxHandshakeVersion: MaxHandshakeVersion,
+	}
+
+	for _, opt := range options {
+		opt(conn)
+	}
+
+	return conn
+}
+
+// WithMinHandshakeVersion is a functional option used to set the minimum
+// handshake version supported.
+func WithMinHandshakeVersion(version byte) func(*NoiseGrpcConn) {
+	return func(conn *NoiseGrpcConn) {
+		conn.minHandshakeVersion = version
+	}
+}
+
+// WithMaxHandshakeVersion is a functional option used to set the maximum
+// handshake version supported.
+func WithMaxHandshakeVersion(version byte) func(*NoiseGrpcConn) {
+	return func(conn *NoiseGrpcConn) {
+		conn.maxHandshakeVersion = version
 	}
 }
 
@@ -168,7 +196,7 @@ func (c *NoiseGrpcConn) ClientHandshake(_ context.Context, _ string,
 	var err error
 	c.noise, err = NewBrontideMachine(
 		true, XXPattern, c.localKey, c.remoteKey, c.password,
-		c.authData, HandshakeVersion,
+		c.authData, c.minHandshakeVersion, c.maxHandshakeVersion,
 	)
 	if err != nil {
 		return nil, nil, err
@@ -186,6 +214,7 @@ func (c *NoiseGrpcConn) ClientHandshake(_ context.Context, _ string,
 	}
 
 	if err := c.noise.DoHandshake(c.ProxyConn); err != nil {
+		fmt.Println("HERE, C")
 		return nil, nil, err
 	}
 
@@ -231,7 +260,7 @@ func (c *NoiseGrpcConn) ServerHandshake(conn net.Conn) (net.Conn,
 	var err error
 	c.noise, err = NewBrontideMachine(
 		false, XXPattern, c.localKey, c.remoteKey, c.password,
-		c.authData, HandshakeVersion,
+		c.authData, c.minHandshakeVersion, c.maxHandshakeVersion,
 	)
 	if err != nil {
 		return nil, nil, err
