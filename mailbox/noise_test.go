@@ -3,6 +3,7 @@ package mailbox
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"net"
 	"testing"
@@ -203,6 +204,10 @@ func TestKKHandshake(t *testing.T) {
 // TestHandshake tests that client and server are able successfully perform
 // a handshake.
 func TestHandshake(t *testing.T) {
+	largeAuthData := make([]byte, 3*1024*1024)
+	_, err := rand.Read(largeAuthData)
+	require.NoError(t, err)
+
 	tests := []struct {
 		name             string
 		serverMinVersion byte
@@ -218,6 +223,30 @@ func TestHandshake(t *testing.T) {
 			clientMinVersion: HandshakeVersion0,
 			clientMaxVersion: HandshakeVersion0,
 			authData:         []byte{0, 1, 2, 3},
+		},
+		{
+			name:             "server v1 and client v1",
+			serverMinVersion: HandshakeVersion1,
+			serverMaxVersion: HandshakeVersion1,
+			clientMinVersion: HandshakeVersion1,
+			clientMaxVersion: HandshakeVersion1,
+			authData:         largeAuthData,
+		},
+		{
+			name:             "server v0 and client [v0, v1]",
+			serverMinVersion: HandshakeVersion0,
+			serverMaxVersion: HandshakeVersion0,
+			clientMinVersion: HandshakeVersion0,
+			clientMaxVersion: HandshakeVersion1,
+			authData:         []byte{0, 1, 2, 3},
+		},
+		{
+			name:             "server v1 and client [v0, v1]",
+			serverMinVersion: HandshakeVersion0,
+			serverMaxVersion: HandshakeVersion1,
+			clientMinVersion: HandshakeVersion0,
+			clientMaxVersion: HandshakeVersion1,
+			authData:         largeAuthData,
 		},
 	}
 
