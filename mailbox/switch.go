@@ -14,6 +14,8 @@ import (
 type SwitchConn struct {
 	cfg *SwitchConfig
 
+	ctx context.Context
+
 	sid   [64]byte
 	sidMu sync.Mutex
 
@@ -27,15 +29,16 @@ type SwitchConfig struct {
 	RemoteKey *btcec.PublicKey
 	LocalKey  keychain.SingleKeyECDH
 
-	NewProxyConn func(ctx context.Context, sid [64]byte) (ProxyConn,
-		error)
+	NewProxyConn func(sid [64]byte) (ProxyConn, error)
 
 	RefreshProxyConn func(conn ProxyConn) (ProxyConn, error)
 
 	StopProxyConn func(conn ProxyConn) error
 }
 
-func NewSwitchConn(cfg *SwitchConfig) (*SwitchConn, error) {
+func NewSwitchConn(ctx context.Context, cfg *SwitchConfig) (*SwitchConn,
+	error) {
+
 	var (
 		entropy = cfg.Password
 		err     error
@@ -48,18 +51,19 @@ func NewSwitchConn(cfg *SwitchConfig) (*SwitchConn, error) {
 	}
 
 	return &SwitchConn{
+		ctx: ctx,
 		cfg: cfg,
 		sid: sha512.Sum512(entropy),
 	}, nil
 }
 
-func (s *SwitchConn) NextConn(ctx context.Context) error {
+func (s *SwitchConn) NextConn() error {
 	// If there is currently an active connection, block here until the
 	// previous connection as been closed.
 	if s.ProxyConn != nil {
 		log.Debugf("Accept: have existing mailbox connection, waiting")
 		select {
-		case <-ctx.Done():
+		case <-s.ctx.Done():
 			return io.EOF
 		case <-s.ProxyConn.Done():
 			log.Debugf("Accept: done with existing conn")
@@ -73,7 +77,7 @@ func (s *SwitchConn) NextConn(ctx context.Context) error {
 		err  error
 	)
 	if s.ProxyConn == nil {
-		conn, err = s.cfg.NewProxyConn(ctx, s.sid)
+		conn, err = s.cfg.NewProxyConn(s.sid)
 		if err != nil {
 			log.Errorf("couldn't create new server: %v", err)
 			if err := conn.Close(); err != nil {
@@ -102,9 +106,31 @@ func (s *SwitchConn) Addr() net.Addr {
 	return &Addr{SID: s.sid, Server: s.cfg.ServerHost}
 }
 
-func (s *SwitchConn) Switch() {
-	//TODO implement me
-	panic("implement me")
+func (s *SwitchConn) Switch(remoteKey *btcec.PublicKey) error {
+	s.cfg.RemoteKey = remoteKey
+
+	if err := s.cfg.StopProxyConn(s.ProxyConn); err != nil {
+		return err
+	}
+
+	entropy, err := ecdh(s.cfg.RemoteKey, s.cfg.LocalKey)
+	if err != nil {
+		return err
+	}
+
+	s.sid = sha512.Sum512(entropy)
+
+	conn, err := s.cfg.NewProxyConn(s.sid)
+	if err != nil {
+		log.Errorf("couldn't create new server: %v", err)
+		if err := conn.Close(); err != nil {
+			return err
+		}
+		return err
+	}
+
+	s.ProxyConn = conn
+	return nil
 }
 
 func (s *SwitchConn) Stop() error {

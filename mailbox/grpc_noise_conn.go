@@ -24,9 +24,9 @@ const (
 // interface and can therefore be used as a replacement of the default TLS
 // implementation that's used by HTTP/2.
 type NoiseGrpcConn struct {
-	ProxyConn
+	*SwitchConn
 
-	proxyConnMtx sync.RWMutex
+	switchConnMtx sync.RWMutex
 
 	password []byte
 	authData []byte
@@ -86,8 +86,8 @@ func WithMaxHandshakeVersion(version byte) func(*NoiseGrpcConn) {
 //
 // NOTE: This is part of the net.Conn interface.
 func (c *NoiseGrpcConn) Read(b []byte) (n int, err error) {
-	c.proxyConnMtx.RLock()
-	defer c.proxyConnMtx.RUnlock()
+	c.switchConnMtx.RLock()
+	defer c.switchConnMtx.RUnlock()
 
 	c.nextMsgMtx.Lock()
 	defer c.nextMsgMtx.Unlock()
@@ -101,7 +101,7 @@ func (c *NoiseGrpcConn) Read(b []byte) (n int, err error) {
 		return msgLen, nil
 	}
 
-	requestBytes, err := c.noise.ReadMessage(c.ProxyConn)
+	requestBytes, err := c.noise.ReadMessage(c.SwitchConn)
 	if err != nil {
 		return 0, fmt.Errorf("error decrypting payload: %v", err)
 	}
@@ -128,31 +128,31 @@ func (c *NoiseGrpcConn) Read(b []byte) (n int, err error) {
 //
 // NOTE: This is part of the net.Conn interface.
 func (c *NoiseGrpcConn) Write(b []byte) (int, error) {
-	c.proxyConnMtx.RLock()
-	defer c.proxyConnMtx.RUnlock()
+	c.switchConnMtx.RLock()
+	defer c.switchConnMtx.RUnlock()
 
 	err := c.noise.WriteMessage(b)
 	if err != nil {
 		return 0, err
 	}
 
-	return c.noise.Flush(c.ProxyConn)
+	return c.noise.Flush(c.SwitchConn)
 }
 
 // LocalAddr returns the local address of this connection.
 //
 // NOTE: This is part of the Conn interface.
 func (c *NoiseGrpcConn) LocalAddr() net.Addr {
-	c.proxyConnMtx.RLock()
-	defer c.proxyConnMtx.RUnlock()
+	c.switchConnMtx.RLock()
+	defer c.switchConnMtx.RUnlock()
 
-	if c.ProxyConn == nil {
+	if c.SwitchConn == nil {
 		return &NoiseAddr{PubKey: c.localKey.PubKey()}
 	}
 
 	return &NoiseAddr{
 		PubKey: c.localKey.PubKey(),
-		Server: c.ProxyConn.LocalAddr().String(),
+		Server: c.SwitchConn.LocalAddr().String(),
 	}
 }
 
@@ -160,16 +160,16 @@ func (c *NoiseGrpcConn) LocalAddr() net.Addr {
 //
 // NOTE: This is part of the Conn interface.
 func (c *NoiseGrpcConn) RemoteAddr() net.Addr {
-	c.proxyConnMtx.RLock()
-	defer c.proxyConnMtx.RUnlock()
+	c.switchConnMtx.RLock()
+	defer c.switchConnMtx.RUnlock()
 
-	if c.ProxyConn == nil {
+	if c.SwitchConn == nil {
 		return &NoiseAddr{PubKey: c.remoteKey}
 	}
 
 	return &NoiseAddr{
 		PubKey: c.remoteKey,
-		Server: c.ProxyConn.RemoteAddr().String(),
+		Server: c.SwitchConn.RemoteAddr().String(),
 	}
 }
 
@@ -180,16 +180,16 @@ func (c *NoiseGrpcConn) RemoteAddr() net.Addr {
 func (c *NoiseGrpcConn) ClientHandshake(_ context.Context, _ string,
 	conn net.Conn) (net.Conn, credentials.AuthInfo, error) {
 
-	c.proxyConnMtx.Lock()
-	defer c.proxyConnMtx.Unlock()
+	c.switchConnMtx.Lock()
+	defer c.switchConnMtx.Unlock()
 
 	log.Tracef("Starting client handshake")
 
-	transportConn, ok := conn.(ProxyConn)
+	transportConn, ok := conn.(*SwitchConn)
 	if !ok {
 		return nil, nil, fmt.Errorf("invalid connection type")
 	}
-	c.ProxyConn = transportConn
+	c.SwitchConn = transportConn
 
 	// First, initialize a new noise machine with our static long term, and
 	// password.
@@ -212,12 +212,12 @@ func (c *NoiseGrpcConn) ClientHandshake(_ context.Context, _ string,
 	// We'll ensure that we get a response from the remote peer in a timely
 	// manner. If they don't respond within 1s, then we'll kill the
 	// connection.
-	err = c.ProxyConn.SetReadDeadline(time.Now().Add(handshakeReadTimeout))
+	err = c.SwitchConn.SetReadDeadline(time.Now().Add(handshakeReadTimeout))
 	if err != nil {
 		return nil, nil, err
 	}
 
-	if err := c.noise.DoHandshake(c.ProxyConn); err != nil {
+	if err := c.noise.DoHandshake(c.SwitchConn); err != nil {
 		return nil, nil, err
 	}
 
@@ -228,7 +228,7 @@ func (c *NoiseGrpcConn) ClientHandshake(_ context.Context, _ string,
 
 	// We'll reset the deadline as it's no longer critical beyond the
 	// initial handshake.
-	err = c.ProxyConn.SetReadDeadline(time.Time{})
+	err = c.SwitchConn.SetReadDeadline(time.Time{})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -247,16 +247,16 @@ func (c *NoiseGrpcConn) ClientHandshake(_ context.Context, _ string,
 func (c *NoiseGrpcConn) ServerHandshake(conn net.Conn) (net.Conn,
 	credentials.AuthInfo, error) {
 
-	c.proxyConnMtx.Lock()
-	defer c.proxyConnMtx.Unlock()
+	c.switchConnMtx.Lock()
+	defer c.switchConnMtx.Unlock()
 
 	log.Tracef("Starting server handshake")
 
-	transportConn, ok := conn.(ProxyConn)
+	transportConn, ok := conn.(*SwitchConn)
 	if !ok {
 		return nil, nil, fmt.Errorf("invalid connection type")
 	}
-	c.ProxyConn = transportConn
+	c.SwitchConn = transportConn
 
 	// First, we'll initialize a new state machine with our static key,
 	// remote static key, passphrase, and also the authentication data.
@@ -277,12 +277,12 @@ func (c *NoiseGrpcConn) ServerHandshake(conn net.Conn) (net.Conn,
 	// We'll ensure that we get a response from the remote peer in a timely
 	// manner. If they don't respond within 1s, then we'll kill the
 	// connection.
-	err = c.ProxyConn.SetReadDeadline(time.Now().Add(handshakeReadTimeout))
+	err = c.SwitchConn.SetReadDeadline(time.Now().Add(handshakeReadTimeout))
 	if err != nil {
 		return nil, nil, err
 	}
 
-	if err := c.noise.DoHandshake(c.ProxyConn); err != nil {
+	if err := c.noise.DoHandshake(c.SwitchConn); err != nil {
 		return nil, nil, err
 	}
 
@@ -315,30 +315,30 @@ func (c *NoiseGrpcConn) Info() credentials.ProtocolInfo {
 	}
 }
 
-// Close ensures that we hold a lock on the ProxyConn before calling close on
-// it to ensure that the handshake functions don't use the ProxyConn at the same
-// time.
+// Close ensures that we hold a lock on the SwitchConn before calling close on
+// it to ensure that the handshake functions don't use the SwitchConn at the
+// same time.
 //
 // NOTE: This is part of the net.Conn interface.
 func (c *NoiseGrpcConn) Close() error {
-	c.proxyConnMtx.RLock()
-	defer c.proxyConnMtx.RUnlock()
+	c.switchConnMtx.RLock()
+	defer c.switchConnMtx.RUnlock()
 
-	return c.ProxyConn.Close()
+	return c.SwitchConn.Close()
 }
 
 // Clone makes a copy of this TransportCredentials.
 //
 // NOTE: This is part of the credentials.TransportCredentials interface.
 func (c *NoiseGrpcConn) Clone() credentials.TransportCredentials {
-	c.proxyConnMtx.RLock()
-	defer c.proxyConnMtx.RUnlock()
+	c.switchConnMtx.RLock()
+	defer c.switchConnMtx.RUnlock()
 
 	return &NoiseGrpcConn{
-		ProxyConn: c.ProxyConn,
-		authData:  c.authData,
-		localKey:  c.localKey,
-		remoteKey: c.remoteKey,
+		SwitchConn: c.SwitchConn,
+		authData:   c.authData,
+		localKey:   c.localKey,
+		remoteKey:  c.remoteKey,
 	}
 }
 

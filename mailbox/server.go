@@ -34,16 +34,18 @@ func NewServer(serverHost string, password []byte,
 
 	clientConn := hashmailrpc.NewHashMailClient(mailboxGrpcConn)
 
-	serverSwitch, err := NewSwitchConn(&SwitchConfig{
+	s := &Server{}
+
+	s.ctx, s.cancel = context.WithCancel(context.Background())
+
+	serverSwitch, err := NewSwitchConn(s.ctx, &SwitchConfig{
 		ServerHost: serverHost,
 		Password:   password,
 		LocalKey:   localKey,
 		RemoteKey:  remoteKey,
-		NewProxyConn: func(ctx context.Context,
-			sid [64]byte) (ProxyConn, error) {
-
+		NewProxyConn: func(sid [64]byte) (ProxyConn, error) {
 			return NewServerConn(
-				ctx, serverHost, clientConn, sid,
+				s.ctx, serverHost, clientConn, sid,
 			)
 		},
 		RefreshProxyConn: func(conn ProxyConn) (ProxyConn, error) {
@@ -68,11 +70,7 @@ func NewServer(serverHost string, password []byte,
 		return nil, err
 	}
 
-	s := &Server{
-		mailboxConn: serverSwitch,
-	}
-
-	s.ctx, s.cancel = context.WithCancel(context.Background())
+	s.mailboxConn = serverSwitch
 
 	return s, nil
 }
@@ -90,7 +88,7 @@ func (s *Server) Accept() (net.Conn, error) {
 	default:
 	}
 
-	err := s.mailboxConn.NextConn(s.ctx)
+	err := s.mailboxConn.NextConn()
 	if err != nil {
 		return nil, &temporaryError{err}
 	}

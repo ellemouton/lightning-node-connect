@@ -23,13 +23,12 @@ func NewClient(ctx context.Context, password []byte,
 	localKey keychain.SingleKeyECDH, remoteKey *btcec.PublicKey,
 	serverHost string) (*Client, error) {
 
-	clientSwitch, err := NewSwitchConn(&SwitchConfig{
+	clientSwitch, err := NewSwitchConn(ctx, &SwitchConfig{
 		ServerHost: serverHost,
 		Password:   password,
 		LocalKey:   localKey,
 		RemoteKey:  remoteKey,
-		NewProxyConn: func(ctx context.Context,
-			sid [64]byte) (ProxyConn, error) {
+		NewProxyConn: func(sid [64]byte) (ProxyConn, error) {
 
 			return NewClientConn(ctx, sid, serverHost)
 		},
@@ -63,7 +62,7 @@ func NewClient(ctx context.Context, password []byte,
 func (c *Client) Dial(_ context.Context, _ string) (net.Conn, error) {
 	log.Debugf("Client: Dialing...")
 
-	err := c.mailboxConn.NextConn(c.ctx)
+	err := c.mailboxConn.NextConn()
 	if err != nil {
 		return nil, &temporaryError{err}
 	}
