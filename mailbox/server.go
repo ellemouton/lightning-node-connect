@@ -15,9 +15,7 @@ import (
 var _ net.Listener = (*Server)(nil)
 
 type Server struct {
-	serverHost string
-
-	mailboxConn *ServerSwitch
+	mailboxConn *SwitchConn
 
 	ctx context.Context
 
@@ -36,15 +34,41 @@ func NewServer(serverHost string, password []byte,
 
 	clientConn := hashmailrpc.NewHashMailClient(mailboxGrpcConn)
 
-	serverSwitch, err := NewServerSwitch(
-		serverHost, clientConn, password, localKey, remoteKey,
-	)
+	serverSwitch, err := NewSwitchConn(&SwitchConfig{
+		ServerHost: serverHost,
+		Password:   password,
+		LocalKey:   localKey,
+		RemoteKey:  remoteKey,
+		NewProxyConn: func(ctx context.Context,
+			sid [64]byte) (ProxyConn, error) {
+
+			return NewServerConn(
+				ctx, serverHost, clientConn, sid,
+			)
+		},
+		RefreshProxyConn: func(conn ProxyConn) (ProxyConn, error) {
+			serverConn, ok := conn.(*ServerConn)
+			if !ok {
+				return nil, fmt.Errorf("conn not of type " +
+					"ServerConn")
+			}
+
+			return RefreshServerConn(serverConn)
+		},
+		StopProxyConn: func(conn ProxyConn) error {
+			serverConn, ok := conn.(*ServerConn)
+			if !ok {
+				return fmt.Errorf("conn not of type ServerConn")
+			}
+
+			return serverConn.Stop()
+		},
+	})
 	if err != nil {
 		return nil, err
 	}
 
 	s := &Server{
-		serverHost:  serverHost,
 		mailboxConn: serverSwitch,
 	}
 

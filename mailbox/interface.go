@@ -97,6 +97,8 @@ type controlConn interface {
 type ProxyConn interface {
 	net.Conn
 	controlConn
+
+	Done() <-chan struct{}
 }
 
 // connKit is a type that implements the common functionality imposed upon the

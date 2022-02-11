@@ -2,6 +2,7 @@ package mailbox
 
 import (
 	"context"
+	"fmt"
 	"net"
 
 	"github.com/btcsuite/btcd/btcec"
@@ -11,7 +12,7 @@ import (
 // Client manages the mailboxConn it holds and refreshes it on connection
 // retries.
 type Client struct {
-	mailboxConn *ClientSwitch
+	mailboxConn *SwitchConn
 
 	ctx context.Context
 }
@@ -22,11 +23,31 @@ func NewClient(ctx context.Context, password []byte,
 	localKey keychain.SingleKeyECDH, remoteKey *btcec.PublicKey,
 	serverHost string) (*Client, error) {
 
-	clientSwitch, err := NewClientSwitch(
-		serverHost, password, localKey, remoteKey,
-	)
+	clientSwitch, err := NewSwitchConn(&SwitchConfig{
+		ServerHost: serverHost,
+		Password:   password,
+		LocalKey:   localKey,
+		RemoteKey:  remoteKey,
+		NewProxyConn: func(ctx context.Context,
+			sid [64]byte) (ProxyConn, error) {
+
+			return NewClientConn(ctx, sid, serverHost)
+		},
+		RefreshProxyConn: func(conn ProxyConn) (ProxyConn, error) {
+			clientConn, ok := conn.(*ClientConn)
+			if !ok {
+				return nil, fmt.Errorf("conn not of type " +
+					"ClientConn")
+			}
+
+			return RefreshClientConn(clientConn)
+		},
+		StopProxyConn: func(conn ProxyConn) error {
+			return nil
+		},
+	})
 	if err != nil {
-		return nil, err
+		return nil, nil
 	}
 
 	return &Client{

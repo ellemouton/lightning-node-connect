@@ -8,38 +8,60 @@ import (
 	"sync"
 
 	"github.com/btcsuite/btcd/btcec"
-	"github.com/lightninglabs/lightning-node-connect/hashmailrpc"
 	"github.com/lightningnetwork/lnd/keychain"
 )
 
-type Switch interface {
-	NextConn(ctx context.Context) error
-	Switch()
-}
-
-type ServerSwitch struct {
-	serverAddr string
-	client     hashmailrpc.HashMailClient
-
-	localKey keychain.SingleKeyECDH
+type SwitchConn struct {
+	cfg *SwitchConfig
 
 	sid   [64]byte
 	sidMu sync.Mutex
 
-	*ServerConn
+	ProxyConn
 }
 
-var _ Switch = (*ServerSwitch)(nil)
+type SwitchConfig struct {
+	ServerHost string
 
-func (s *ServerSwitch) NextConn(ctx context.Context) error {
+	Password  []byte
+	RemoteKey *btcec.PublicKey
+	LocalKey  keychain.SingleKeyECDH
+
+	NewProxyConn func(ctx context.Context, sid [64]byte) (ProxyConn,
+		error)
+
+	RefreshProxyConn func(conn ProxyConn) (ProxyConn, error)
+
+	StopProxyConn func(conn ProxyConn) error
+}
+
+func NewSwitchConn(cfg *SwitchConfig) (*SwitchConn, error) {
+	var (
+		entropy = cfg.Password
+		err     error
+	)
+	if cfg.RemoteKey != nil {
+		entropy, err = ecdh(cfg.RemoteKey, cfg.LocalKey)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return &SwitchConn{
+		cfg: cfg,
+		sid: sha512.Sum512(entropy),
+	}, nil
+}
+
+func (s *SwitchConn) NextConn(ctx context.Context) error {
 	// If there is currently an active connection, block here until the
 	// previous connection as been closed.
-	if s.ServerConn != nil {
+	if s.ProxyConn != nil {
 		log.Debugf("Accept: have existing mailbox connection, waiting")
 		select {
 		case <-ctx.Done():
 			return io.EOF
-		case <-s.ServerConn.Done():
+		case <-s.ProxyConn.Done():
 			log.Debugf("Accept: done with existing conn")
 		}
 	}
@@ -47,152 +69,53 @@ func (s *ServerSwitch) NextConn(ctx context.Context) error {
 	// If this is the first connection, we create a new ServerConn object.
 	// otherwise, we just refresh the ServerConn.
 	var (
-		serverConn *ServerConn
-		err        error
+		conn ProxyConn
+		err  error
 	)
-	if s.ServerConn == nil {
-		serverConn, err = NewServerConn(
-			ctx, s.serverAddr, s.client, s.sid,
-		)
+	if s.ProxyConn == nil {
+		conn, err = s.cfg.NewProxyConn(ctx, s.sid)
 		if err != nil {
 			log.Errorf("couldn't create new server: %v", err)
-			if err := serverConn.Close(); err != nil {
+			if err := conn.Close(); err != nil {
 				return err
 			}
 			return err
 		}
 	} else {
-		serverConn, err = RefreshServerConn(s.ServerConn)
+		conn, err = s.cfg.RefreshProxyConn(s.ProxyConn)
 		if err != nil {
 			log.Errorf("couldn't refresh server: %v", err)
-			if err := serverConn.Stop(); err != nil {
+			if err := s.cfg.StopProxyConn(conn); err != nil {
 				return err
 			}
 
-			s.ServerConn = nil
+			s.ProxyConn = nil
 			return err
 		}
 	}
 
-	s.ServerConn = serverConn
+	s.ProxyConn = conn
 	return nil
 }
 
-func (s *ServerSwitch) Addr() net.Addr {
-	return &Addr{SID: s.sid, Server: s.serverAddr}
+func (s *SwitchConn) Addr() net.Addr {
+	return &Addr{SID: s.sid, Server: s.cfg.ServerHost}
 }
 
-func (s *ServerSwitch) Switch() {
+func (s *SwitchConn) Switch() {
 	//TODO implement me
 	panic("implement me")
 }
 
-func (s *ServerSwitch) Stop() error {
-	if s.ServerConn != nil {
-		if err := s.ServerConn.Stop(); err != nil {
+func (s *SwitchConn) Stop() error {
+	if s.ProxyConn != nil {
+		if err := s.cfg.StopProxyConn(s.ProxyConn); err != nil {
 			return err
 		}
 	}
 
 	return nil
 }
-
-func NewServerSwitch(addr string, client hashmailrpc.HashMailClient,
-	password []byte, localKey keychain.SingleKeyECDH,
-	remoteKey *btcec.PublicKey) (*ServerSwitch, error) {
-
-	var (
-		entropy = password
-		err     error
-	)
-	if remoteKey != nil {
-		entropy, err = ecdh(remoteKey, localKey)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	return &ServerSwitch{
-		serverAddr: addr,
-		client:     client,
-		localKey:   localKey,
-		sid:        sha512.Sum512(entropy),
-	}, nil
-}
-
-type ClientSwitch struct {
-	serverHost string
-
-	remoteKey *btcec.PublicKey
-	sid       [64]byte
-	sidMu     *sync.Mutex
-
-	*ClientConn
-}
-
-func NewClientSwitch(addr string, password []byte,
-	localKey keychain.SingleKeyECDH,
-	remoteKey *btcec.PublicKey) (*ClientSwitch, error) {
-
-	var (
-		entropy = password
-		err     error
-	)
-	if remoteKey != nil {
-		entropy, err = ecdh(remoteKey, localKey)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	return &ClientSwitch{
-		serverHost: addr,
-		remoteKey:  remoteKey,
-		sid:        sha512.Sum512(entropy),
-	}, nil
-}
-
-func (c *ClientSwitch) NextConn(ctx context.Context) error {
-	// If there is currently an active connection, block here until the
-	// previous connection as been closed.
-	if c.ClientConn != nil {
-		log.Debugf("Dial: have existing mailbox connection, waiting")
-		<-c.ClientConn.Done()
-		log.Debugf("Dial: done with existing conn")
-	}
-
-	var (
-		clientConn *ClientConn
-		err        error
-	)
-	if c.ClientConn == nil {
-		clientConn, err = NewClientConn(ctx, c.sid, c.serverHost)
-		if err != nil {
-			if err := clientConn.Close(); err != nil {
-				return err
-			}
-			return err
-		}
-	} else {
-		clientConn, err = RefreshClientConn(ctx, c.ClientConn)
-		if err != nil {
-			if err := clientConn.Close(); err != nil {
-				return err
-			}
-			return err
-		}
-	}
-
-	c.ClientConn = clientConn
-	return nil
-}
-
-func (c *ClientSwitch) Switch() {
-	//TODO implement me
-	panic("implement me")
-}
-
-var _ Switch = (*ClientSwitch)(nil)
 
 func GetSID(sid [64]byte, serverToClient bool) [64]byte {
 	if serverToClient {
