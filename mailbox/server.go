@@ -2,12 +2,13 @@ package mailbox
 
 import (
 	"context"
-	"crypto/sha512"
 	"fmt"
 	"io"
 	"net"
 
+	"github.com/btcsuite/btcd/btcec"
 	"github.com/lightninglabs/lightning-node-connect/hashmailrpc"
+	"github.com/lightningnetwork/lnd/keychain"
 	"google.golang.org/grpc"
 )
 
@@ -16,18 +17,15 @@ var _ net.Listener = (*Server)(nil)
 type Server struct {
 	serverHost string
 
-	client hashmailrpc.HashMailClient
+	mailboxConn *ServerSwitch
 
-	mailboxConn *ServerConn
-
-	sid [64]byte
 	ctx context.Context
 
-	quit   chan struct{}
 	cancel func()
 }
 
 func NewServer(serverHost string, password []byte,
+	localKey keychain.SingleKeyECDH, remoteKey *btcec.PublicKey,
 	dialOpts ...grpc.DialOption) (*Server, error) {
 
 	mailboxGrpcConn, err := grpc.Dial(serverHost, dialOpts...)
@@ -38,11 +36,16 @@ func NewServer(serverHost string, password []byte,
 
 	clientConn := hashmailrpc.NewHashMailClient(mailboxGrpcConn)
 
+	serverSwitch, err := NewServerSwitch(
+		serverHost, clientConn, password, localKey, remoteKey,
+	)
+	if err != nil {
+		return nil, err
+	}
+
 	s := &Server{
-		serverHost: serverHost,
-		client:     clientConn,
-		sid:        sha512.Sum512(password),
-		quit:       make(chan struct{}),
+		serverHost:  serverHost,
+		mailboxConn: serverSwitch,
 	}
 
 	s.ctx, s.cancel = context.WithCancel(context.Background())
@@ -63,48 +66,9 @@ func (s *Server) Accept() (net.Conn, error) {
 	default:
 	}
 
-	// If there is currently an active connection, block here until the
-	// previous connection as been closed.
-	if s.mailboxConn != nil {
-		log.Debugf("Accept: have existing mailbox connection, waiting")
-		select {
-		case <-s.quit:
-			return nil, io.EOF
-		case <-s.mailboxConn.Done():
-			log.Debugf("Accept: done with existing conn")
-		}
-	}
-
-	receiveSID := GetSID(s.sid, false)
-	sendSID := GetSID(s.sid, true)
-
-	// If this is the first connection, we create a new ServerConn object.
-	// otherwise, we just refresh the ServerConn.
-	if s.mailboxConn == nil {
-		mailboxConn, err := NewServerConn(
-			s.ctx, s.serverHost, s.client, receiveSID, sendSID,
-		)
-		if err != nil {
-			log.Errorf("couldn't create new server: %v", err)
-			if err := mailboxConn.Close(); err != nil {
-				return nil, &temporaryError{err}
-			}
-			return nil, &temporaryError{err}
-		}
-		s.mailboxConn = mailboxConn
-
-	} else {
-		mailboxConn, err := RefreshServerConn(s.mailboxConn)
-		if err != nil {
-			log.Errorf("couldn't refresh server: %v", err)
-			if err := mailboxConn.Stop(); err != nil {
-				return nil, &temporaryError{err}
-			}
-
-			s.mailboxConn = nil
-			return nil, &temporaryError{err}
-		}
-		s.mailboxConn = mailboxConn
+	err := s.mailboxConn.NextConn(s.ctx)
+	if err != nil {
+		return nil, &temporaryError{err}
 	}
 
 	return s.mailboxConn, nil
@@ -127,29 +91,14 @@ func (e *temporaryError) Temporary() bool {
 func (s *Server) Close() error {
 	log.Debugf("conn being closed")
 
-	close(s.quit)
-
-	if s.mailboxConn != nil {
-		if err := s.mailboxConn.Stop(); err != nil {
-			log.Errorf("error closing mailboxConn %v", err)
-		}
+	if err := s.mailboxConn.Stop(); err != nil {
+		log.Errorf("error closing mailboxConn %v", err)
 	}
+
 	s.cancel()
 	return nil
 }
 
 func (s *Server) Addr() net.Addr {
-	return &Addr{SID: s.sid, Server: s.serverHost}
-}
-
-func GetSID(sid [64]byte, serverToClient bool) [64]byte {
-	if serverToClient {
-		return sid
-	}
-
-	var clientToServerSID [64]byte
-	copy(clientToServerSID[:], sid[:])
-	clientToServerSID[63] ^= 0x01
-
-	return clientToServerSID
+	return s.mailboxConn.Addr()
 }

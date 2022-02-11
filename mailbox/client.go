@@ -3,23 +3,35 @@ package mailbox
 import (
 	"context"
 	"net"
+
+	"github.com/btcsuite/btcd/btcec"
+	"github.com/lightningnetwork/lnd/keychain"
 )
 
 // Client manages the mailboxConn it holds and refreshes it on connection
 // retries.
 type Client struct {
-	mailboxConn *ClientConn
+	mailboxConn *ClientSwitch
 
 	ctx context.Context
-	sid [64]byte
 }
 
 // NewClient creates a new Client object which will handle the mailbox
 // connection.
-func NewClient(ctx context.Context, sid [64]byte) (*Client, error) {
+func NewClient(ctx context.Context, password []byte,
+	localKey keychain.SingleKeyECDH, remoteKey *btcec.PublicKey,
+	serverHost string) (*Client, error) {
+
+	clientSwitch, err := NewClientSwitch(
+		serverHost, password, localKey, remoteKey,
+	)
+	if err != nil {
+		return nil, err
+	}
+
 	return &Client{
-		ctx: ctx,
-		sid: sid,
+		mailboxConn: clientSwitch,
+		ctx:         ctx,
 	}, nil
 }
 
@@ -27,36 +39,12 @@ func NewClient(ctx context.Context, sid [64]byte) (*Client, error) {
 // called everytime grpc retries the connection. If this is the first
 // connection, a new ClientConn will be created. Otherwise, the existing
 // connection will just be refreshed.
-func (c *Client) Dial(_ context.Context, serverHost string) (net.Conn,
-	error) {
-
-	// If there is currently an active connection, block here until the
-	// previous connection as been closed.
-	if c.mailboxConn != nil {
-		log.Debugf("Dial: have existing mailbox connection, waiting")
-		<-c.mailboxConn.Done()
-		log.Debugf("Dial: done with existing conn")
-	}
-
+func (c *Client) Dial(_ context.Context, _ string) (net.Conn, error) {
 	log.Debugf("Client: Dialing...")
-	if c.mailboxConn == nil {
-		mailboxConn, err := NewClientConn(c.ctx, c.sid, serverHost)
-		if err != nil {
-			if err := mailboxConn.Close(); err != nil {
-				return nil, &temporaryError{err}
-			}
-			return nil, &temporaryError{err}
-		}
-		c.mailboxConn = mailboxConn
-	} else {
-		mailboxConn, err := RefreshClientConn(c.ctx, c.mailboxConn)
-		if err != nil {
-			if err := mailboxConn.Close(); err != nil {
-				return nil, &temporaryError{err}
-			}
-			return nil, &temporaryError{err}
-		}
-		c.mailboxConn = mailboxConn
+
+	err := c.mailboxConn.NextConn(c.ctx)
+	if err != nil {
+		return nil, &temporaryError{err}
 	}
 
 	return c.mailboxConn, nil

@@ -5,7 +5,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha512"
 	"strings"
 
 	"github.com/btcsuite/btcd/btcec"
@@ -22,8 +21,6 @@ func mailboxRPCConnection(mailboxServer,
 	copy(mnemonicWords[:], words)
 	password := mailbox.PasswordMnemonicToEntropy(mnemonicWords)
 
-	sid := sha512.Sum512(password[:])
-
 	privKey, err := btcec.NewPrivateKey(btcec.S256())
 	if err != nil {
 		return nil, err
@@ -31,7 +28,9 @@ func mailboxRPCConnection(mailboxServer,
 	ecdh := &keychain.PrivKeyECDH{PrivKey: privKey}
 
 	ctx := context.Background()
-	transportConn, err := mailbox.NewClient(ctx, sid)
+	transportConn, err := mailbox.NewClient(
+		ctx, password[:], ecdh, nil, mailboxServer,
+	)
 	if err != nil {
 		return nil, err
 	}
