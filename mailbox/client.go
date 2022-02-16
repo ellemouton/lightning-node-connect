@@ -5,7 +5,7 @@ import (
 	"net"
 )
 
-// Client manages the mailboxConn it holds and refreshes it on connection
+// Client manages the switchConn it holds and refreshes it on connection
 // retries.
 type Client struct {
 	mailboxConn *ClientConn

@@ -250,7 +250,7 @@ func (c *NoiseGrpcConn) ServerHandshake(conn net.Conn) (net.Conn,
 	c.proxyConnMtx.Lock()
 	defer c.proxyConnMtx.Unlock()
 
-	log.Tracef("Starting server handshake")
+	log.Debugf("Starting server handshake")
 
 	transportConn, ok := conn.(ProxyConn)
 	if !ok {
