@@ -43,6 +43,7 @@ func NewServer(serverHost string, password []byte,
 	}
 
 	clientConn := hashmailrpc.NewHashMailClient(mailboxGrpcConn)
+	ctx, cancel := context.WithCancel(context.Background())
 
 	s := &Server{
 		serverHost: serverHost,
@@ -51,29 +52,27 @@ func NewServer(serverHost string, password []byte,
 		localKey:   localKey,
 		remoteKey:  remoteKey,
 		quit:       make(chan struct{}),
-	}
-	s.ctx, s.cancel = context.WithCancel(context.Background())
+		ctx:        ctx,
+		cancel:     cancel,
+		switchConfig: &SwitchConfig{
+			ServerHost: serverHost,
+			Password:   password,
+			LocalKey:   localKey,
+			RemoteKey:  remoteKey,
+			NewProxyConn: func(sid [64]byte) (ProxyConn, error) {
+				return NewServerConn(ctx, serverHost, clientConn, sid)
+			},
+			RefreshProxyConn: func(conn ProxyConn) (ProxyConn, error) {
+				serverConn, ok := conn.(*ServerConn)
+				if !ok {
+					return nil, fmt.Errorf("conn not of type " +
+						"ServerConn")
+				}
 
-	switchConfig := &SwitchConfig{
-		ServerHost: serverHost,
-		Password:   password,
-		LocalKey:   localKey,
-		RemoteKey:  remoteKey,
-		NewProxyConn: func(sid [64]byte) (ProxyConn, error) {
-			return NewServerConn(s.ctx, serverHost, clientConn, sid)
+				return RefreshServerConn(serverConn)
+			},
 		},
-		RefreshProxyConn: func(conn ProxyConn) (ProxyConn, error) {
-			serverConn, ok := conn.(*ServerConn)
-			if !ok {
-				return nil, fmt.Errorf("conn not of type " +
-					"ServerConn")
-			}
-
-			return RefreshServerConn(serverConn)
-		},
 	}
-
-	s.switchConfig = switchConfig
 
 	return s, nil
 }
