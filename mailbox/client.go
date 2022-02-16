@@ -42,7 +42,7 @@ func NewClient(ctx context.Context, password []byte,
 			return RefreshClientConn(clientConn)
 		},
 		StopProxyConn: func(conn ProxyConn) error {
-			return nil
+			return conn.Close()
 		},
 	})
 	if err != nil {

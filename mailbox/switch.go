@@ -107,13 +107,12 @@ func (s *SwitchConn) Addr() net.Addr {
 }
 
 func (s *SwitchConn) Switch(remoteKey *btcec.PublicKey) error {
-	s.cfg.RemoteKey = remoteKey
 
 	if err := s.cfg.StopProxyConn(s.ProxyConn); err != nil {
 		return err
 	}
 
-	entropy, err := ecdh(s.cfg.RemoteKey, s.cfg.LocalKey)
+	entropy, err := ecdh(remoteKey, s.cfg.LocalKey)
 	if err != nil {
 		return err
 	}

@@ -70,7 +70,7 @@ func (s *serverHarness) start(newPassword bool) error {
 		return err
 	}
 
-	noiseConn := mailbox.NewNoiseGrpcConn(ecdh, nil, pswdEntropy[:])
+	noiseConn := mailbox.NewNoiseGrpcConn(ecdh, nil, nil, pswdEntropy[:])
 
 	s.mockServer = grpc.NewServer(
 		grpc.Creds(noiseConn),

@@ -47,15 +47,20 @@ type NoiseGrpcConn struct {
 // The auth data can be set for server connections and is sent as the payload
 // to the client during the handshake.
 func NewNoiseGrpcConn(localKey keychain.SingleKeyECDH,
-	authData []byte, password []byte,
+	remoteKey *btcec.PublicKey, authData []byte, password []byte,
 	options ...func(conn *NoiseGrpcConn)) *NoiseGrpcConn {
 
 	conn := &NoiseGrpcConn{
 		localKey:            localKey,
+		remoteKey:           remoteKey,
 		authData:            authData,
 		password:            password,
 		minHandshakeVersion: MinHandshakeVersion,
 		maxHandshakeVersion: MaxHandshakeVersion,
+	}
+
+	if remoteKey != nil && conn.minHandshakeVersion < HandshakeVersion2 {
+		conn.minHandshakeVersion = HandshakeVersion2
 	}
 
 	for _, opt := range options {
@@ -187,24 +192,9 @@ func (c *NoiseGrpcConn) ClientHandshake(_ context.Context, _ string,
 
 	transportConn, ok := conn.(*SwitchConn)
 	if !ok {
-		return nil, nil, fmt.Errorf("invalid connection type")
+		return nil, nil, fmt.Errorf("invalid connection type: %T", conn)
 	}
 	c.SwitchConn = transportConn
-
-	// First, initialize a new noise machine with our static long term, and
-	// password.
-	var err error
-	c.noise, err = NewBrontideMachine(&BrontideMachineConfig{
-		Initiator:           true,
-		HandshakePattern:    XXPattern,
-		LocalStaticKey:      c.localKey,
-		PAKEPassphrase:      c.password,
-		MinHandshakeVersion: c.minHandshakeVersion,
-		MaxHandshakeVersion: c.maxHandshakeVersion,
-	})
-	if err != nil {
-		return nil, nil, err
-	}
 
 	log.Debugf("Kicking off client handshake with client_key=%x",
 		c.localKey.PubKey().SerializeCompressed())
@@ -212,19 +202,94 @@ func (c *NoiseGrpcConn) ClientHandshake(_ context.Context, _ string,
 	// We'll ensure that we get a response from the remote peer in a timely
 	// manner. If they don't respond within 1s, then we'll kill the
 	// connection.
-	err = c.SwitchConn.SetReadDeadline(time.Now().Add(handshakeReadTimeout))
+	err := c.SwitchConn.SetReadDeadline(
+		time.Now().Add(handshakeReadTimeout),
+	)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	if err := c.noise.DoHandshake(c.SwitchConn); err != nil {
-		return nil, nil, err
+	// First, initialize a new noise machine with our static long term, and
+	// password.
+	if c.remoteKey == nil {
+		fmt.Println("CLient: remote is nil, doing XX")
+		var err error
+		c.noise, err = NewBrontideMachine(&BrontideMachineConfig{
+			Initiator:           true,
+			HandshakePattern:    XXPattern,
+			LocalStaticKey:      c.localKey,
+			PAKEPassphrase:      c.password,
+			MinHandshakeVersion: c.minHandshakeVersion,
+			MaxHandshakeVersion: c.maxHandshakeVersion,
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+
+		if err := c.noise.DoHandshake(c.SwitchConn); err != nil {
+			return nil, nil, err
+		}
+
+		// TODO(elle): need to here ensure that the server has received
+		// the last message before terminating the connection. Need to
+		// build perhaps a blocking Send() option into GBN layer so it
+		// only returns if all ACKs for that message have been received.
+		time.Sleep(time.Second)
+
+		if c.noise.version >= HandshakeVersion2 {
+			fmt.Println("Client: XX done, now doing KK")
+			// At this point, we'll also extract the auth data and
+			// remote static key obtained during the handshake.
+			c.remoteKey = c.noise.remoteStatic
+
+			if err := c.SwitchConn.Switch(c.remoteKey); err != nil {
+				fmt.Println("CLIENT EXITING HERE")
+				return nil, nil, err
+			}
+
+			c.noise, err = NewBrontideMachine(
+				&BrontideMachineConfig{
+					Initiator:           true,
+					HandshakePattern:    KKPattern,
+					LocalStaticKey:      c.localKey,
+					RemoteStaticKey:     c.remoteKey,
+					MinHandshakeVersion: HandshakeVersion2, // TODO(elle): fix this
+					MaxHandshakeVersion: c.maxHandshakeVersion,
+				})
+			if err != nil {
+				fmt.Println("CLIENT EXITING HERE")
+				return nil, nil, err
+			}
+
+			if err := c.noise.DoHandshake(c.SwitchConn); err != nil {
+				fmt.Println("CLIENT EXITING HERE")
+				return nil, nil, err
+			}
+		}
+
+	} else {
+		fmt.Println("CLient: Remote is non nil, starting with KK")
+		// At this point, we'll also extract the auth data and
+		c.noise, err = NewBrontideMachine(
+			&BrontideMachineConfig{
+				Initiator:           true,
+				HandshakePattern:    KKPattern,
+				LocalStaticKey:      c.localKey,
+				RemoteStaticKey:     c.remoteKey,
+				MinHandshakeVersion: HandshakeVersion2, // TODO(elle): fix this
+				MaxHandshakeVersion: c.maxHandshakeVersion,
+			})
+		if err != nil {
+			return nil, nil, err
+		}
+
+		if err := c.noise.DoHandshake(c.SwitchConn); err != nil {
+			fmt.Println("CLIENT EXITING HERE")
+			return nil, nil, err
+		}
 	}
 
-	// At this point, we'll also extract the auth data and remote static
-	// key obtained during the handshake.
 	c.authData = c.noise.receivedPayload
-	c.remoteKey = c.noise.remoteStatic
 
 	// We'll reset the deadline as it's no longer critical beyond the
 	// initial handshake.
@@ -247,10 +312,12 @@ func (c *NoiseGrpcConn) ClientHandshake(_ context.Context, _ string,
 func (c *NoiseGrpcConn) ServerHandshake(conn net.Conn) (net.Conn,
 	credentials.AuthInfo, error) {
 
+	log.Debugf("WAITING HERE")
+
 	c.switchConnMtx.Lock()
 	defer c.switchConnMtx.Unlock()
 
-	log.Tracef("Starting server handshake")
+	log.Debugf("Starting server handshake")
 
 	transportConn, ok := conn.(*SwitchConn)
 	if !ok {
@@ -258,37 +325,90 @@ func (c *NoiseGrpcConn) ServerHandshake(conn net.Conn) (net.Conn,
 	}
 	c.SwitchConn = transportConn
 
-	// First, we'll initialize a new state machine with our static key,
-	// remote static key, passphrase, and also the authentication data.
-	var err error
-	c.noise, err = NewBrontideMachine(&BrontideMachineConfig{
-		Initiator:           false,
-		HandshakePattern:    XXPattern,
-		MinHandshakeVersion: c.minHandshakeVersion,
-		MaxHandshakeVersion: c.maxHandshakeVersion,
-		LocalStaticKey:      c.localKey,
-		PAKEPassphrase:      c.password,
-		AuthData:            c.authData,
-	})
-	if err != nil {
-		return nil, nil, err
-	}
-
 	// We'll ensure that we get a response from the remote peer in a timely
 	// manner. If they don't respond within 1s, then we'll kill the
 	// connection.
-	err = c.SwitchConn.SetReadDeadline(time.Now().Add(handshakeReadTimeout))
+	err := c.SwitchConn.SetReadDeadline(time.Now().Add(handshakeReadTimeout))
 	if err != nil {
 		return nil, nil, err
 	}
 
-	if err := c.noise.DoHandshake(c.SwitchConn); err != nil {
-		return nil, nil, err
-	}
+	if c.remoteKey == nil {
+		fmt.Println("Server: remote is nil. Doing XX")
+		// First, we'll initialize a new state machine with our static key,
+		// remote static key, passphrase, and also the authentication data.
+		var err error
+		c.noise, err = NewBrontideMachine(&BrontideMachineConfig{
+			Initiator:           false,
+			HandshakePattern:    XXPattern,
+			MinHandshakeVersion: c.minHandshakeVersion,
+			MaxHandshakeVersion: c.maxHandshakeVersion,
+			LocalStaticKey:      c.localKey,
+			PAKEPassphrase:      c.password,
+			AuthData:            c.authData,
+		})
+		if err != nil {
+			fmt.Println("SERVER EXITING HERE 1")
+			return nil, nil, err
+		}
 
-	// At this point, we'll also extract the auth data and remote static
-	// key obtained during the handshake.
-	c.remoteKey = c.noise.remoteStatic
+		if err := c.noise.DoHandshake(c.SwitchConn); err != nil {
+			fmt.Println("SERVER EXITING HERE 2")
+			return nil, nil, err
+		}
+
+		if c.noise.version >= HandshakeVersion2 {
+			fmt.Println("Server: XX is done. Now switching and doing KK")
+			// At this point, we'll also extract the and remote
+			// static key obtained during the handshake.
+			c.remoteKey = c.noise.remoteStatic
+
+			// SWITCH
+			if err := c.SwitchConn.Switch(c.remoteKey); err != nil {
+				fmt.Println("SERVER EXITING HERE 3")
+				return nil, nil, err
+			}
+
+			c.noise, err = NewBrontideMachine(&BrontideMachineConfig{
+				Initiator:           false,
+				HandshakePattern:    KKPattern,
+				MinHandshakeVersion: HandshakeVersion2,
+				MaxHandshakeVersion: c.maxHandshakeVersion,
+				LocalStaticKey:      c.localKey,
+				RemoteStaticKey:     c.remoteKey,
+				AuthData:            c.authData,
+			})
+			if err != nil {
+				fmt.Println("SERVER EXITING HERE 4")
+				return nil, nil, err
+			}
+
+			if err := c.noise.DoHandshake(c.SwitchConn); err != nil {
+				fmt.Println("SERVER EXITING HERE 5")
+				return nil, nil, err
+			}
+		}
+	} else {
+		fmt.Println("Server: remote is non-nil. Doing KK")
+		c.noise, err = NewBrontideMachine(&BrontideMachineConfig{
+			Initiator:           false,
+			HandshakePattern:    KKPattern,
+			MinHandshakeVersion: HandshakeVersion2,
+			MaxHandshakeVersion: c.maxHandshakeVersion,
+			LocalStaticKey:      c.localKey,
+			RemoteStaticKey:     c.remoteKey,
+			AuthData:            c.authData,
+		})
+		if err != nil {
+			fmt.Println("SERVER EXITING HERE 6")
+			return nil, nil, err
+		}
+
+		if err := c.noise.DoHandshake(c.SwitchConn); err != nil {
+			fmt.Printf("SERVER EXITING HERE 7 %v\n", err)
+			return nil, nil, err
+		}
+	}
 
 	// We'll reset the deadline as it's no longer critical beyond the
 	// initial handshake.

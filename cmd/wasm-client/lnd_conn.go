@@ -35,7 +35,7 @@ func mailboxRPCConnection(mailboxServer,
 		return nil, err
 	}
 
-	noiseConn := mailbox.NewNoiseGrpcConn(ecdh, nil, password[:])
+	noiseConn := mailbox.NewNoiseGrpcConn(ecdh, nil, nil, password[:])
 
 	dialOpts := []grpc.DialOption{
 		grpc.WithContextDialer(transportConn.Dial),
