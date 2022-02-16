@@ -44,6 +44,15 @@ func NewClient(ctx context.Context, password []byte,
 
 				return RefreshClientConn(clientConn)
 			},
+			StopProxyConn: func(conn ProxyConn) error {
+				clientConn, ok := conn.(*ClientConn)
+				if !ok {
+					return fmt.Errorf("conn not of type " +
+						"ClientConn")
+				}
+
+				return clientConn.Close()
+			},
 		},
 	}, nil
 }

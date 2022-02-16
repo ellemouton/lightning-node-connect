@@ -61,6 +61,8 @@ const (
 	// is sent in a dynamically sized, length-prefixed payload in act 2.
 	HandshakeVersion1 = byte(1)
 
+	HandshakeVersion2 = byte(2)
+
 	// MinHandshakeVersion is the minimum handshake version that is
 	// currently supported.
 	MinHandshakeVersion = HandshakeVersion0
@@ -69,7 +71,7 @@ const (
 	// support. Any messages that carry a version not between
 	// MinHandshakeVersion and MaxHandshakeVersion will cause the handshake
 	// to abort immediately.
-	MaxHandshakeVersion = HandshakeVersion1
+	MaxHandshakeVersion = HandshakeVersion2
 
 	// ActTwoPayloadSize is the size of the fixed sized payload that can be
 	// sent from the responder to the Initiator in act two.
@@ -463,7 +465,7 @@ func (h *handshakeState) writeMsgPattern(w io.Writer, mp MessagePattern) error {
 			return err
 		}
 
-	case HandshakeVersion1:
+	case HandshakeVersion1, HandshakeVersion2:
 		var payload []byte
 		switch mp.ActNum {
 		case act1, act3:
@@ -594,7 +596,7 @@ func (h *handshakeState) readMsgPattern(r io.Reader, mp MessagePattern) error {
 
 		h.receivedPayload = authData
 
-	case HandshakeVersion1:
+	case HandshakeVersion1, HandshakeVersion2:
 		var payloadSize uint32
 		switch mp.ActNum {
 		case act1, act3:

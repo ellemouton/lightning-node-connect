@@ -24,9 +24,8 @@ const (
 // interface and can therefore be used as a replacement of the default TLS
 // implementation that's used by HTTP/2.
 type NoiseGrpcConn struct {
-	ProxyConn
-
-	proxyConnMtx sync.RWMutex
+	*SwitchConn
+	switchConnMtx sync.RWMutex
 
 	password []byte
 	authData []byte
@@ -41,25 +40,34 @@ type NoiseGrpcConn struct {
 
 	minHandshakeVersion byte
 	maxHandshakeVersion byte
+
+	onRemoteKey func(remoteKey *btcec.PublicKey)
 }
 
 // NewNoiseGrpcConn creates a new noise connection using given local ECDH key.
 // The auth data can be set for server connections and is sent as the payload
 // to the client during the handshake.
 func NewNoiseGrpcConn(localKey keychain.SingleKeyECDH,
-	authData []byte, password []byte,
+	remoteKey *btcec.PublicKey, authData []byte, password []byte,
+	onRemoteKey func(remoteKey *btcec.PublicKey),
 	options ...func(conn *NoiseGrpcConn)) *NoiseGrpcConn {
 
 	conn := &NoiseGrpcConn{
 		localKey:            localKey,
+		remoteKey:           remoteKey,
 		authData:            authData,
 		password:            password,
 		minHandshakeVersion: MinHandshakeVersion,
 		maxHandshakeVersion: MaxHandshakeVersion,
+		onRemoteKey:         onRemoteKey,
 	}
 
 	for _, opt := range options {
 		opt(conn)
+	}
+
+	if remoteKey != nil && conn.minHandshakeVersion < HandshakeVersion2 {
+		conn.minHandshakeVersion = HandshakeVersion2
 	}
 
 	return conn
@@ -86,8 +94,8 @@ func WithMaxHandshakeVersion(version byte) func(*NoiseGrpcConn) {
 //
 // NOTE: This is part of the net.Conn interface.
 func (c *NoiseGrpcConn) Read(b []byte) (n int, err error) {
-	c.proxyConnMtx.RLock()
-	defer c.proxyConnMtx.RUnlock()
+	c.switchConnMtx.RLock()
+	defer c.switchConnMtx.RUnlock()
 
 	c.nextMsgMtx.Lock()
 	defer c.nextMsgMtx.Unlock()
@@ -101,7 +109,7 @@ func (c *NoiseGrpcConn) Read(b []byte) (n int, err error) {
 		return msgLen, nil
 	}
 
-	requestBytes, err := c.noise.ReadMessage(c.ProxyConn)
+	requestBytes, err := c.noise.ReadMessage(c.SwitchConn)
 	if err != nil {
 		return 0, fmt.Errorf("error decrypting payload: %v", err)
 	}
@@ -128,31 +136,31 @@ func (c *NoiseGrpcConn) Read(b []byte) (n int, err error) {
 //
 // NOTE: This is part of the net.Conn interface.
 func (c *NoiseGrpcConn) Write(b []byte) (int, error) {
-	c.proxyConnMtx.RLock()
-	defer c.proxyConnMtx.RUnlock()
+	c.switchConnMtx.RLock()
+	defer c.switchConnMtx.RUnlock()
 
 	err := c.noise.WriteMessage(b)
 	if err != nil {
 		return 0, err
 	}
 
-	return c.noise.Flush(c.ProxyConn)
+	return c.noise.Flush(c.SwitchConn)
 }
 
 // LocalAddr returns the local address of this connection.
 //
 // NOTE: This is part of the Conn interface.
 func (c *NoiseGrpcConn) LocalAddr() net.Addr {
-	c.proxyConnMtx.RLock()
-	defer c.proxyConnMtx.RUnlock()
+	c.switchConnMtx.RLock()
+	defer c.switchConnMtx.RUnlock()
 
-	if c.ProxyConn == nil {
+	if c.SwitchConn == nil {
 		return &NoiseAddr{PubKey: c.localKey.PubKey()}
 	}
 
 	return &NoiseAddr{
 		PubKey: c.localKey.PubKey(),
-		Server: c.ProxyConn.LocalAddr().String(),
+		Server: c.SwitchConn.LocalAddr().String(),
 	}
 }
 
@@ -160,16 +168,16 @@ func (c *NoiseGrpcConn) LocalAddr() net.Addr {
 //
 // NOTE: This is part of the Conn interface.
 func (c *NoiseGrpcConn) RemoteAddr() net.Addr {
-	c.proxyConnMtx.RLock()
-	defer c.proxyConnMtx.RUnlock()
+	c.switchConnMtx.RLock()
+	defer c.switchConnMtx.RUnlock()
 
-	if c.ProxyConn == nil {
+	if c.SwitchConn == nil {
 		return &NoiseAddr{PubKey: c.remoteKey}
 	}
 
 	return &NoiseAddr{
 		PubKey: c.remoteKey,
-		Server: c.ProxyConn.RemoteAddr().String(),
+		Server: c.SwitchConn.RemoteAddr().String(),
 	}
 }
 
@@ -180,31 +188,16 @@ func (c *NoiseGrpcConn) RemoteAddr() net.Addr {
 func (c *NoiseGrpcConn) ClientHandshake(_ context.Context, _ string,
 	conn net.Conn) (net.Conn, credentials.AuthInfo, error) {
 
-	c.proxyConnMtx.Lock()
-	defer c.proxyConnMtx.Unlock()
+	c.switchConnMtx.Lock()
+	defer c.switchConnMtx.Unlock()
 
 	log.Tracef("Starting client handshake")
 
-	transportConn, ok := conn.(ProxyConn)
+	transportConn, ok := conn.(*SwitchConn)
 	if !ok {
 		return nil, nil, fmt.Errorf("invalid connection type")
 	}
-	c.ProxyConn = transportConn
-
-	// First, initialize a new noise machine with our static long term, and
-	// password.
-	var err error
-	c.noise, err = NewBrontideMachine(&BrontideMachineConfig{
-		Initiator:           true,
-		HandshakePattern:    XXPattern,
-		LocalStaticKey:      c.localKey,
-		PAKEPassphrase:      c.password,
-		MinHandshakeVersion: c.minHandshakeVersion,
-		MaxHandshakeVersion: c.maxHandshakeVersion,
-	})
-	if err != nil {
-		return nil, nil, err
-	}
+	c.SwitchConn = transportConn
 
 	log.Debugf("Kicking off client handshake with client_key=%x",
 		c.localKey.PubKey().SerializeCompressed())
@@ -212,23 +205,92 @@ func (c *NoiseGrpcConn) ClientHandshake(_ context.Context, _ string,
 	// We'll ensure that we get a response from the remote peer in a timely
 	// manner. If they don't respond within 1s, then we'll kill the
 	// connection.
-	err = c.ProxyConn.SetReadDeadline(time.Now().Add(handshakeReadTimeout))
+	err := c.SwitchConn.SetReadDeadline(
+		time.Now().Add(handshakeReadTimeout),
+	)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	if err := c.noise.DoHandshake(c.ProxyConn); err != nil {
-		return nil, nil, err
+	// First, initialize a new noise machine with our static long term, and
+	// password.
+	if c.remoteKey == nil {
+		var err error
+		c.noise, err = NewBrontideMachine(&BrontideMachineConfig{
+			Initiator:           true,
+			HandshakePattern:    XXPattern,
+			LocalStaticKey:      c.localKey,
+			PAKEPassphrase:      c.password,
+			MinHandshakeVersion: c.minHandshakeVersion,
+			MaxHandshakeVersion: c.maxHandshakeVersion,
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+
+		if err := c.noise.DoHandshake(c.SwitchConn); err != nil {
+			return nil, nil, err
+		}
+
+		// TODO(elle): need to here ensure that the server has received
+		// the last message before terminating the connection. Need to
+		// build perhaps a blocking Send() option into GBN layer so it
+		// only returns if all ACKs for that message have been received.
+		time.Sleep(time.Second)
+
+		if c.noise.version >= HandshakeVersion2 {
+			// At this point, we'll also extract the auth data and
+			// remote static key obtained during the handshake.
+			c.remoteKey = c.noise.remoteStatic
+			c.onRemoteKey(c.remoteKey)
+
+			if err := c.SwitchConn.Switch(c.remoteKey); err != nil {
+				return nil, nil, err
+			}
+
+			c.noise, err = NewBrontideMachine(
+				&BrontideMachineConfig{
+					Initiator:           true,
+					HandshakePattern:    KKPattern,
+					LocalStaticKey:      c.localKey,
+					RemoteStaticKey:     c.remoteKey,
+					MinHandshakeVersion: HandshakeVersion2, // TODO(elle): fix this
+					MaxHandshakeVersion: c.maxHandshakeVersion,
+				})
+			if err != nil {
+				return nil, nil, err
+			}
+
+			if err := c.noise.DoHandshake(c.SwitchConn); err != nil {
+				return nil, nil, err
+			}
+		}
+	} else {
+		c.noise, err = NewBrontideMachine(
+			&BrontideMachineConfig{
+				Initiator:           true,
+				HandshakePattern:    KKPattern,
+				LocalStaticKey:      c.localKey,
+				RemoteStaticKey:     c.remoteKey,
+				MinHandshakeVersion: HandshakeVersion2,
+				MaxHandshakeVersion: c.maxHandshakeVersion,
+			})
+		if err != nil {
+			return nil, nil, err
+		}
+
+		if err := c.noise.DoHandshake(c.SwitchConn); err != nil {
+			return nil, nil, err
+		}
 	}
 
 	// At this point, we'll also extract the auth data and remote static
 	// key obtained during the handshake.
 	c.authData = c.noise.receivedPayload
-	c.remoteKey = c.noise.remoteStatic
 
 	// We'll reset the deadline as it's no longer critical beyond the
 	// initial handshake.
-	err = c.ProxyConn.SetReadDeadline(time.Time{})
+	err = c.SwitchConn.SetReadDeadline(time.Time{})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -247,48 +309,93 @@ func (c *NoiseGrpcConn) ClientHandshake(_ context.Context, _ string,
 func (c *NoiseGrpcConn) ServerHandshake(conn net.Conn) (net.Conn,
 	credentials.AuthInfo, error) {
 
-	c.proxyConnMtx.Lock()
-	defer c.proxyConnMtx.Unlock()
+	c.switchConnMtx.Lock()
+	defer c.switchConnMtx.Unlock()
 
 	log.Debugf("Starting server handshake")
 
-	transportConn, ok := conn.(ProxyConn)
+	transportConn, ok := conn.(*SwitchConn)
 	if !ok {
 		return nil, nil, fmt.Errorf("invalid connection type")
 	}
-	c.ProxyConn = transportConn
-
-	// First, we'll initialize a new state machine with our static key,
-	// remote static key, passphrase, and also the authentication data.
-	var err error
-	c.noise, err = NewBrontideMachine(&BrontideMachineConfig{
-		Initiator:           false,
-		HandshakePattern:    XXPattern,
-		MinHandshakeVersion: c.minHandshakeVersion,
-		MaxHandshakeVersion: c.maxHandshakeVersion,
-		LocalStaticKey:      c.localKey,
-		PAKEPassphrase:      c.password,
-		AuthData:            c.authData,
-	})
-	if err != nil {
-		return nil, nil, err
-	}
+	c.SwitchConn = transportConn
 
 	// We'll ensure that we get a response from the remote peer in a timely
 	// manner. If they don't respond within 1s, then we'll kill the
 	// connection.
-	err = c.ProxyConn.SetReadDeadline(time.Now().Add(handshakeReadTimeout))
+	err := c.SwitchConn.SetReadDeadline(
+		time.Now().Add(handshakeReadTimeout),
+	)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	if err := c.noise.DoHandshake(c.ProxyConn); err != nil {
-		return nil, nil, err
-	}
+	if c.remoteKey == nil {
+		// First, we'll initialize a new state machine with our static key,
+		// remote static key, passphrase, and also the authentication data.
+		c.noise, err = NewBrontideMachine(&BrontideMachineConfig{
+			Initiator:           false,
+			HandshakePattern:    XXPattern,
+			MinHandshakeVersion: c.minHandshakeVersion,
+			MaxHandshakeVersion: c.maxHandshakeVersion,
+			LocalStaticKey:      c.localKey,
+			PAKEPassphrase:      c.password,
+			AuthData:            c.authData,
+		})
+		if err != nil {
+			return nil, nil, err
+		}
 
-	// At this point, we'll also extract the auth data and remote static
-	// key obtained during the handshake.
-	c.remoteKey = c.noise.remoteStatic
+		if err := c.noise.DoHandshake(c.SwitchConn); err != nil {
+			return nil, nil, err
+		}
+
+		if c.noise.version >= HandshakeVersion2 {
+			// At this point, we'll also extract the and remote
+			// static key obtained during the handshake.
+			c.remoteKey = c.noise.remoteStatic
+			c.onRemoteKey(c.remoteKey)
+
+			// SWITCH
+			if err := c.SwitchConn.Switch(c.remoteKey); err != nil {
+				return nil, nil, err
+			}
+
+			c.noise, err = NewBrontideMachine(&BrontideMachineConfig{
+				Initiator:           false,
+				HandshakePattern:    KKPattern,
+				MinHandshakeVersion: HandshakeVersion2,
+				MaxHandshakeVersion: c.maxHandshakeVersion,
+				LocalStaticKey:      c.localKey,
+				RemoteStaticKey:     c.remoteKey,
+				AuthData:            c.authData,
+			})
+			if err != nil {
+				return nil, nil, err
+			}
+
+			if err := c.noise.DoHandshake(c.SwitchConn); err != nil {
+				return nil, nil, err
+			}
+		}
+	} else {
+		c.noise, err = NewBrontideMachine(&BrontideMachineConfig{
+			Initiator:           false,
+			HandshakePattern:    KKPattern,
+			MinHandshakeVersion: HandshakeVersion2,
+			MaxHandshakeVersion: c.maxHandshakeVersion,
+			LocalStaticKey:      c.localKey,
+			RemoteStaticKey:     c.remoteKey,
+			AuthData:            c.authData,
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+
+		if err := c.noise.DoHandshake(c.SwitchConn); err != nil {
+			return nil, nil, err
+		}
+	}
 
 	// We'll reset the deadline as it's no longer critical beyond the
 	// initial handshake.
@@ -315,30 +422,30 @@ func (c *NoiseGrpcConn) Info() credentials.ProtocolInfo {
 	}
 }
 
-// Close ensures that we hold a lock on the ProxyConn before calling close on
-// it to ensure that the handshake functions don't use the ProxyConn at the same
-// time.
+// Close ensures that we hold a lock on the SwitchConn before calling close on
+// it to ensure that the handshake functions don't use the SwitchConn at the
+// same time.
 //
 // NOTE: This is part of the net.Conn interface.
 func (c *NoiseGrpcConn) Close() error {
-	c.proxyConnMtx.RLock()
-	defer c.proxyConnMtx.RUnlock()
+	c.switchConnMtx.RLock()
+	defer c.switchConnMtx.RUnlock()
 
-	return c.ProxyConn.Close()
+	return c.SwitchConn.Close()
 }
 
 // Clone makes a copy of this TransportCredentials.
 //
 // NOTE: This is part of the credentials.TransportCredentials interface.
 func (c *NoiseGrpcConn) Clone() credentials.TransportCredentials {
-	c.proxyConnMtx.RLock()
-	defer c.proxyConnMtx.RUnlock()
+	c.switchConnMtx.RLock()
+	defer c.switchConnMtx.RUnlock()
 
 	return &NoiseGrpcConn{
-		ProxyConn: c.ProxyConn,
-		authData:  c.authData,
-		localKey:  c.localKey,
-		remoteKey: c.remoteKey,
+		SwitchConn: c.SwitchConn,
+		authData:   c.authData,
+		localKey:   c.localKey,
+		remoteKey:  c.remoteKey,
 	}
 }
 

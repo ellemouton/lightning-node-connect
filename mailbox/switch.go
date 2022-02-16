@@ -14,7 +14,8 @@ type SwitchConn struct {
 
 	ProxyConn
 
-	sid [64]byte
+	sid   [64]byte
+	sidMu sync.Mutex
 
 	closeOnce sync.Once
 	quit      chan struct{}
@@ -29,6 +30,7 @@ type SwitchConfig struct {
 
 	NewProxyConn     func(sid [64]byte) (ProxyConn, error)
 	RefreshProxyConn func(conn ProxyConn) (ProxyConn, error)
+	StopProxyConn    func(conn ProxyConn) error
 }
 
 func NewSwitchConn(cfg *SwitchConfig) (*SwitchConn, error) {
@@ -64,6 +66,8 @@ func NewSwitchConn(cfg *SwitchConfig) (*SwitchConn, error) {
 }
 
 func RefreshSwitchConn(s *SwitchConn) (*SwitchConn, error) {
+	s.sidMu.Lock()
+	defer s.sidMu.Unlock()
 	sc := &SwitchConn{
 		cfg:  s.cfg,
 		sid:  s.sid,
@@ -99,4 +103,31 @@ func (s *SwitchConn) Close() error {
 
 func (s *SwitchConn) Done() chan struct{} {
 	return s.quit
+}
+
+func (s *SwitchConn) Switch(remoteKey *btcec.PublicKey) error {
+	if err := s.cfg.StopProxyConn(s.ProxyConn); err != nil {
+		return err
+	}
+
+	entropy, err := ecdh(remoteKey, s.cfg.LocalKey)
+	if err != nil {
+		return err
+	}
+
+	s.sidMu.Lock()
+	s.sid = sha512.Sum512(entropy)
+
+	conn, err := s.cfg.NewProxyConn(s.sid)
+	s.sidMu.Unlock()
+	if err != nil {
+		log.Errorf("couldn't create new server: %v", err)
+		if err := conn.Close(); err != nil {
+			return err
+		}
+		return err
+	}
+
+	s.ProxyConn = conn
+	return nil
 }

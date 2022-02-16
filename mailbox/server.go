@@ -71,6 +71,14 @@ func NewServer(serverHost string, password []byte,
 
 				return RefreshServerConn(serverConn)
 			},
+			StopProxyConn: func(conn ProxyConn) error {
+				serverConn, ok := conn.(*ServerConn)
+				if !ok {
+					return fmt.Errorf("conn not of type ServerConn")
+				}
+
+				return serverConn.Stop()
+			},
 		},
 	}
 
