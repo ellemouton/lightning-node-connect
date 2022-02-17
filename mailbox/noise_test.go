@@ -39,13 +39,6 @@ func TestSpake2Mask(t *testing.T) {
 // Noise_XX pattern handshake and then use the encrypted connection to exchange
 // messages afterwards.
 func TestXXHandshake(t *testing.T) {
-	// First, generate static keys for each party.
-	pk1, err := btcec.NewPrivateKey(btcec.S256())
-	require.NoError(t, err)
-
-	pk2, err := btcec.NewPrivateKey(btcec.S256())
-	require.NoError(t, err)
-
 	// Create a password that will be used to mask the first ephemeral key.
 	pass := []byte("top secret")
 	passHash := sha256.Sum256(pass)
@@ -56,7 +49,7 @@ func TestXXHandshake(t *testing.T) {
 
 	// Create a pipe and give one end to the client and one to the server
 	// as the underlying transport.
-	conn1, conn2 := newMockProxyConns()
+	conn1, conn2 := newMockProxyConns(t)
 	defer func() {
 		conn1.Close()
 		conn2.Close()
@@ -64,7 +57,8 @@ func TestXXHandshake(t *testing.T) {
 
 	// Create a server.
 	server := NewNoiseGrpcConn(
-		&keychain.PrivKeyECDH{PrivKey: pk1}, authData, passHash[:],
+		conn1.cfg.LocalKey, nil, authData, passHash[:],
+		func(remoteKey *btcec.PublicKey) {},
 	)
 
 	// Spin off the server's handshake process.
@@ -80,7 +74,8 @@ func TestXXHandshake(t *testing.T) {
 
 	// Create a client.
 	client := NewNoiseGrpcConn(
-		&keychain.PrivKeyECDH{PrivKey: pk2}, nil, passHash[:],
+		conn2.cfg.LocalKey, nil, nil, passHash[:],
+		func(remoteKey *btcec.PublicKey) {},
 	)
 
 	// Start the client's handshake process.
@@ -106,8 +101,8 @@ func TestXXHandshake(t *testing.T) {
 	require.True(t, bytes.Equal(client.authData, authData))
 
 	// Also check that both parties now have the other parties static key.
-	require.True(t, client.remoteKey.IsEqual(pk1.PubKey()))
-	require.True(t, server.remoteKey.IsEqual(pk2.PubKey()))
+	require.True(t, client.remoteKey.IsEqual(conn1.cfg.LocalKey.PubKey()))
+	require.True(t, server.remoteKey.IsEqual(conn2.cfg.LocalKey.PubKey()))
 
 	// Check that messages can be sent between client and server normally
 	// now.
@@ -161,7 +156,7 @@ func TestKKHandshake(t *testing.T) {
 
 	// Create a pipe and give one end to the client and one to the server
 	// as the underlying transport.
-	conn1, conn2 := newMockProxyConns()
+	conn1, conn2 := newMockProxyConns(t)
 	defer func() {
 		conn1.Close()
 		conn2.Close()
@@ -175,7 +170,7 @@ func TestKKHandshake(t *testing.T) {
 		HandshakePattern:    KKPattern,
 		MinHandshakeVersion: MinHandshakeVersion,
 		MaxHandshakeVersion: MaxHandshakeVersion,
-		LocalStaticKey:      &keychain.PrivKeyECDH{PrivKey: pk1},
+		LocalStaticKey:      conn1.cfg.LocalKey,
 		RemoteStaticKey:     pk2.PubKey(),
 		PAKEPassphrase:      passHash[:],
 		AuthData:            authData,
@@ -197,7 +192,7 @@ func TestKKHandshake(t *testing.T) {
 		HandshakePattern:    KKPattern,
 		MinHandshakeVersion: MinHandshakeVersion,
 		MaxHandshakeVersion: MaxHandshakeVersion,
-		LocalStaticKey:      &keychain.PrivKeyECDH{PrivKey: pk2},
+		LocalStaticKey:      conn2.cfg.LocalKey,
 		RemoteStaticKey:     pk1.PubKey(),
 		PAKEPassphrase:      passHash[:],
 	})
@@ -234,8 +229,8 @@ func TestKKHandshake(t *testing.T) {
 	quit := make(chan struct{})
 	go func() {
 		clientConn := &NoiseGrpcConn{
-			noise:     client,
-			ProxyConn: conn2,
+			noise:      client,
+			SwitchConn: conn2,
 		}
 		var payload []byte
 		for {
@@ -251,8 +246,8 @@ func TestKKHandshake(t *testing.T) {
 	}()
 
 	serverConn := &NoiseGrpcConn{
-		noise:     server,
-		ProxyConn: conn1,
+		noise:      server,
+		SwitchConn: conn1,
 	}
 	for i := 0; i < 10; i++ {
 		testMessage := []byte(fmt.Sprintf("test message %d", i))
@@ -313,35 +308,38 @@ func TestHandshake(t *testing.T) {
 			clientMaxVersion: HandshakeVersion1,
 			authData:         largeAuthData,
 		},
+		{
+			name:             "server v2 and client [v0, v2]",
+			serverMinVersion: HandshakeVersion0,
+			serverMaxVersion: HandshakeVersion2,
+			clientMinVersion: HandshakeVersion0,
+			clientMaxVersion: HandshakeVersion2,
+			authData:         []byte{0, 1, 2, 3},
+		},
 	}
-
-	pk1, err := btcec.NewPrivateKey(btcec.S256())
-	require.NoError(t, err)
-
-	pk2, err := btcec.NewPrivateKey(btcec.S256())
-	require.NoError(t, err)
 
 	for _, test := range tests {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
+			conn1, conn2 := newMockProxyConns(t)
+			defer func() {
+				conn1.Close()
+				conn2.Close()
+			}()
+
 			server := NewNoiseGrpcConn(
-				&keychain.PrivKeyECDH{PrivKey: pk1},
-				test.authData, pass,
+				conn1.cfg.LocalKey, nil, test.authData, pass,
+				func(remoteKey *btcec.PublicKey) {},
 				WithMinHandshakeVersion(test.serverMinVersion),
 				WithMaxHandshakeVersion(test.serverMaxVersion),
 			)
 
 			client := NewNoiseGrpcConn(
-				&keychain.PrivKeyECDH{PrivKey: pk2}, nil, pass,
+				conn2.cfg.LocalKey, nil, nil, pass,
+				func(remoteKey *btcec.PublicKey) {},
 				WithMinHandshakeVersion(test.clientMinVersion),
 				WithMaxHandshakeVersion(test.clientMaxVersion),
 			)
-
-			conn1, conn2 := newMockProxyConns()
-			defer func() {
-				conn1.Close()
-				conn2.Close()
-			}()
 
 			var (
 				serverConn net.Conn
@@ -412,7 +410,34 @@ func (m *mockProxyConn) SendControlMsg(_ ControlMsg) error {
 	return nil
 }
 
-func newMockProxyConns() (*mockProxyConn, *mockProxyConn) {
+func newMockProxyConns(t *testing.T) (*SwitchConn, *SwitchConn) {
+	// First, generate static keys for each party.
+	pk1, err := btcec.NewPrivateKey(btcec.S256())
+	require.NoError(t, err)
+
+	pk2, err := btcec.NewPrivateKey(btcec.S256())
+	require.NoError(t, err)
+
 	c1, c2 := net.Pipe()
-	return &mockProxyConn{c1}, &mockProxyConn{c2}
+
+	switchConn1, _ := NewSwitchConn(&SwitchConfig{
+		LocalKey: &keychain.PrivKeyECDH{PrivKey: pk1},
+		NewProxyConn: func(sid [64]byte) (ProxyConn, error) {
+			return &mockProxyConn{c1}, nil
+		},
+		StopProxyConn: func(conn ProxyConn) error {
+			return nil
+		},
+	})
+
+	switchConn2, _ := NewSwitchConn(&SwitchConfig{
+		LocalKey: &keychain.PrivKeyECDH{PrivKey: pk2},
+		NewProxyConn: func(sid [64]byte) (ProxyConn, error) {
+			return &mockProxyConn{c2}, nil
+		},
+		StopProxyConn: func(conn ProxyConn) error {
+			return nil
+		},
+	})
+	return switchConn1, switchConn2
 }
