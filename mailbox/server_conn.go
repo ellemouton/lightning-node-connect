@@ -232,6 +232,10 @@ func (c *ServerConn) SetSendTimeout(timeout time.Duration) {
 	c.gbnConn.SetSendTimeout(timeout)
 }
 
+func (c *ServerConn) SetBlockingSend(b bool) {
+	c.gbnConn.SetBlockingSend(b)
+}
+
 // createReceiveMailBox attempts to create a cipher box on the hashmail server
 // and then to fetch the read stream of that cipher box. It retries until it
 // succeeds or the ServerConn quits or the passed in context is canceled.

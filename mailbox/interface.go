@@ -90,6 +90,7 @@ type controlConn interface {
 	SendControlMsg(ControlMsg) error
 	SetRecvTimeout(timeout time.Duration)
 	SetSendTimeout(timeout time.Duration)
+	SetBlockingSend(bool)
 }
 
 // ProxyConn is the main interface that any mailbox connection needs to

@@ -75,6 +75,9 @@ type GoBackNConn struct {
 	recvTimeout   time.Duration
 	recvTimeoutMu sync.RWMutex
 
+	blockingSend   bool
+	blockingSendMu sync.Mutex
+
 	isServer bool
 
 	// handshakeTimeout is the time after which the server or client
@@ -165,6 +168,13 @@ func (g *GoBackNConn) SetRecvTimeout(timeout time.Duration) {
 	g.recvTimeout = timeout
 }
 
+func (g *GoBackNConn) SetBlockingSend(blocking bool) {
+	g.blockingSendMu.Lock()
+	defer g.blockingSendMu.Unlock()
+
+	g.blockingSend = blocking
+}
+
 // Send blocks until an ack is received for the packet sent N packets before.
 func (g *GoBackNConn) Send(data []byte) error {
 	// Wait for handshake to complete before we can send data.
@@ -179,6 +189,14 @@ func (g *GoBackNConn) Send(data []byte) error {
 	g.sendTimeoutMu.RUnlock()
 	defer ticker.Stop()
 
+	g.blockingSendMu.Lock()
+	defer g.blockingSendMu.Unlock()
+
+	var doneChan chan struct{}
+	if g.blockingSend {
+		doneChan = make(chan struct{})
+	}
+
 	sendPacket := func(packet *PacketData) error {
 		select {
 		case g.sendDataChan <- packet:
@@ -192,10 +210,26 @@ func (g *GoBackNConn) Send(data []byte) error {
 
 	if g.maxChunkSize == 0 {
 		// Splitting is disabled.
-		return sendPacket(&PacketData{
+		err := sendPacket(&PacketData{
 			Payload:    data,
 			FinalChunk: true,
+			received:   doneChan,
 		})
+		if err != nil {
+			return err
+		}
+
+		if !g.blockingSend {
+			return nil
+		}
+
+		select {
+		case <-g.quit:
+			return fmt.Errorf("cannot send, gbn exited")
+		case <-doneChan:
+		}
+
+		return nil
 	}
 
 	// Splitting is enabled. Split into packets no larger than maxChunkSize.
@@ -208,6 +242,7 @@ func (g *GoBackNConn) Send(data []byte) error {
 			packet.Payload = data[sentBytes:]
 			sentBytes += remainingBytes
 			packet.FinalChunk = true
+			packet.received = doneChan
 		} else {
 			packet.Payload = data[sentBytes : sentBytes+g.maxChunkSize]
 			sentBytes += g.maxChunkSize
@@ -217,6 +252,18 @@ func (g *GoBackNConn) Send(data []byte) error {
 			return err
 		}
 	}
+
+	if !g.blockingSend {
+		return nil
+	}
+
+	select {
+	case <-g.quit:
+		return fmt.Errorf("cannot send, gbn exited")
+	case <-doneChan:
+	}
+
+	return nil
 
 	return nil
 }

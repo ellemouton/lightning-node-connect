@@ -26,6 +26,8 @@ type PacketData struct {
 	FinalChunk bool
 	IsPing     bool
 	Payload    []byte
+
+	received chan struct{}
 }
 
 var _ Message = (*PacketData)(nil)

@@ -10,7 +10,8 @@ import (
 type queue struct {
 	// content is the current content of the queue. This is always a slice
 	// of length s but can contain nil elements if the queue isn't full.
-	content []*PacketData
+	content    []*PacketData
+	contentMtx sync.RWMutex
 
 	// s is the maximum sequence number used to label packets. Packets
 	// are labelled with incrementing sequence numbers modulo s.
@@ -72,6 +73,9 @@ func (q *queue) addPacket(packet *PacketData) {
 	q.topMtx.Lock()
 	defer q.topMtx.Unlock()
 
+	q.contentMtx.Lock()
+	defer q.contentMtx.Unlock()
+
 	packet.Seq = q.sequenceTop
 	q.content[q.sequenceTop] = packet
 	q.sequenceTop = (q.sequenceTop + 1) % q.s
@@ -106,7 +110,9 @@ func (q *queue) resend(cb func(packet *PacketData) error) error {
 	log.Tracef("Resending the queue")
 
 	for base != top {
+		q.contentMtx.RLock()
 		packet := q.content[base]
+		q.contentMtx.RUnlock()
 
 		if err := cb(packet); err != nil {
 			return err
@@ -139,6 +145,12 @@ func (q *queue) processACK(seq uint8) bool {
 		// has decreased.
 		log.Tracef("Received correct ack %d", seq)
 
+		q.contentMtx.Lock()
+		if q.content[q.sequenceBase].received != nil {
+			close(q.content[q.sequenceBase].received)
+		}
+		q.contentMtx.Unlock()
+
 		q.sequenceBase = (q.sequenceBase + 1) % q.s
 
 		// We did receive an ACK.
@@ -161,6 +173,12 @@ func (q *queue) processACK(seq uint8) bool {
 		log.Tracef("Sequence %d is in the queue. Bump the base.", seq)
 
 		q.sequenceBase = (seq + 1) % q.s
+
+		q.contentMtx.Lock()
+		if q.content[q.sequenceBase].received != nil {
+			close(q.content[q.sequenceBase].received)
+		}
+		q.contentMtx.Unlock()
 
 		// We did receive an ACK.
 		return true
@@ -185,7 +203,16 @@ func (q *queue) processNACK(seq uint8) (bool, bool) {
 	// can empty the queue here by bumping the base and we dont need to
 	// trigger a resend.
 	if seq == q.sequenceTop {
-		q.sequenceBase = q.sequenceTop
+		for q.sequenceBase != q.sequenceTop {
+			q.contentMtx.Lock()
+			if q.content[q.sequenceBase].received != nil {
+				close(q.content[q.sequenceBase].received)
+			}
+			q.contentMtx.Unlock()
+
+			q.sequenceBase = (q.sequenceBase + 1) % q.s
+		}
+
 		return true, false
 	}
 
@@ -202,6 +229,16 @@ func (q *queue) processNACK(seq uint8) (bool, bool) {
 	}
 
 	q.sequenceBase = seq
+
+	for q.sequenceBase != seq {
+		q.contentMtx.Lock()
+		if q.content[q.sequenceBase].received != nil {
+			close(q.content[q.sequenceBase].received)
+		}
+		q.contentMtx.Unlock()
+
+		q.sequenceBase = (q.sequenceBase + 1) % q.s
+	}
 
 	return true, bumped
 }

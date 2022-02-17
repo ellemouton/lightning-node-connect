@@ -59,7 +59,10 @@ func TestNormal(t *testing.T) {
 	payload1 := []byte("payload 1")
 	payload2 := []byte("payload 2")
 
+	var wg sync.WaitGroup
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		err := server.Send(payload1)
 		require.NoError(t, err)
 
@@ -74,6 +77,8 @@ func TestNormal(t *testing.T) {
 	msg, err = client.Recv()
 	require.NoError(t, err)
 	require.True(t, bytes.Equal(msg, payload2))
+
+	wg.Wait()
 }
 
 // TestServerHandshakeTimeout ensures that the SetRecvTimout properly exits out
@@ -420,7 +425,11 @@ func TestReceiveDuplicateMessages(t *testing.T) {
 	payload1 := []byte("payload 1")
 	payload2 := []byte("payload 2")
 
+	var wg sync.WaitGroup
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
+
 		err := p1.Send(payload1)
 		require.NoError(t, err)
 
@@ -435,6 +444,8 @@ func TestReceiveDuplicateMessages(t *testing.T) {
 	msg, err = p2.Recv()
 	require.NoError(t, err)
 	require.True(t, bytes.Equal(msg, payload2))
+
+	wg.Wait()
 }
 
 func TestReceiveDuplicateDataAndACKs(t *testing.T) {
@@ -518,7 +529,11 @@ func TestReceiveDuplicateDataAndACKs(t *testing.T) {
 	payload1 := []byte("payload 1")
 	payload2 := []byte("payload 2")
 
+	var wg sync.WaitGroup
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
+
 		err := p1.Send(payload1)
 		require.NoError(t, err)
 
@@ -533,6 +548,8 @@ func TestReceiveDuplicateDataAndACKs(t *testing.T) {
 	msg, err = p2.Recv()
 	require.NoError(t, err)
 	require.True(t, bytes.Equal(msg, payload2))
+
+	wg.Wait()
 }
 
 func TestBidirectional(t *testing.T) {
@@ -585,7 +602,12 @@ func TestBidirectional(t *testing.T) {
 	payload3 := []byte("payload 3")
 	payload4 := []byte("payload 4")
 
+	var wg sync.WaitGroup
+
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
+
 		err := p1.Send(payload1)
 		require.NoError(t, err)
 
@@ -593,7 +615,10 @@ func TestBidirectional(t *testing.T) {
 		require.NoError(t, err)
 	}()
 
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
+
 		err := p2.Send(payload3)
 		require.NoError(t, err)
 
@@ -616,6 +641,8 @@ func TestBidirectional(t *testing.T) {
 	msg, err = p2.Recv()
 	require.NoError(t, err)
 	require.True(t, bytes.Equal(msg, payload2))
+
+	wg.Wait()
 }
 
 func TestSendNBeforeNeedingAck(t *testing.T) {
@@ -1170,7 +1197,10 @@ func TestPayloadSplitting(t *testing.T) {
 	)
 	defer cleanup()
 
+	var wg sync.WaitGroup
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		err := server.Send(payload1)
 		require.NoError(t, err)
 	}()
@@ -1178,6 +1208,8 @@ func TestPayloadSplitting(t *testing.T) {
 	msg, err := client.Recv()
 	require.NoError(t, err)
 	require.True(t, bytes.Equal(msg, payload1))
+
+	wg.Wait()
 }
 
 func setUpClientServerConns(t *testing.T, n uint8,
@@ -1199,6 +1231,7 @@ func setUpClientServerConns(t *testing.T, n uint8,
 
 		var err error
 		server, err = NewServerConn(ctx, sWrite, sRead, opts...)
+		server.SetBlockingSend(true)
 		require.NoError(t, err)
 	}()
 
@@ -1206,6 +1239,7 @@ func setUpClientServerConns(t *testing.T, n uint8,
 	time.Sleep(time.Millisecond * 200)
 
 	client, err := NewClientConn(n, cWrite, cRead, opts...)
+	//client.SetBlockingSend(true)
 	require.NoError(t, err)
 
 	wg.Wait()

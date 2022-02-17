@@ -228,15 +228,21 @@ func (c *NoiseGrpcConn) ClientHandshake(_ context.Context, _ string,
 			return nil, nil, err
 		}
 
+		c.SwitchConn.ProxyConn.SetBlockingSend(true)
+
 		if err := c.noise.DoHandshake(c.SwitchConn); err != nil {
 			return nil, nil, err
 		}
+
+		c.SwitchConn.ProxyConn.SetBlockingSend(false)
 
 		// TODO(elle): need to here ensure that the server has received
 		// the last message before terminating the connection. Need to
 		// build perhaps a blocking Send() option into GBN layer so it
 		// only returns if all ACKs for that message have been received.
-		time.Sleep(time.Second)
+		// Or a graceful close that only shuts down gbn once the queue
+		// is empty?
+		//time.Sleep(time.Second)
 
 		if c.noise.version >= HandshakeVersion2 {
 			// At this point, we'll also extract the auth data and
@@ -346,9 +352,11 @@ func (c *NoiseGrpcConn) ServerHandshake(conn net.Conn) (net.Conn,
 			return nil, nil, err
 		}
 
+		c.SwitchConn.ProxyConn.SetBlockingSend(true)
 		if err := c.noise.DoHandshake(c.SwitchConn); err != nil {
 			return nil, nil, err
 		}
+		c.SwitchConn.ProxyConn.SetBlockingSend(false)
 
 		if c.noise.version >= HandshakeVersion2 {
 			// At this point, we'll also extract the and remote

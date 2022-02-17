@@ -150,7 +150,6 @@ func NewClientConn(ctx context.Context, sid [64]byte,
 // the passed ClientConn but with a new quit channel, a new closeOnce var and
 // a new gbn connection.
 func RefreshClientConn(c *ClientConn) (*ClientConn, error) {
-
 	c.sendStreamMu.Lock()
 	defer c.sendStreamMu.Unlock()
 
@@ -428,6 +427,10 @@ func (c *ClientConn) SetRecvTimeout(timeout time.Duration) {
 // SetSendTimeout sets the timeout to be used when attempting to send data.
 func (c *ClientConn) SetSendTimeout(timeout time.Duration) {
 	c.gbnConn.SetSendTimeout(timeout)
+}
+
+func (c *ClientConn) SetBlockingSend(b bool) {
+	c.gbnConn.SetBlockingSend(b)
 }
 
 // Close closes the underlying mailbox connection.
