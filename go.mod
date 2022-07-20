@@ -11,6 +11,7 @@ require (
 	github.com/lightningnetwork/lnd v0.15.0-beta.rc3
 	github.com/lightningnetwork/lnd/ticker v1.1.0
 	github.com/lightningnetwork/lnd/tor v1.0.0
+	github.com/prometheus/common v0.26.0
 	github.com/stretchr/testify v1.7.1
 	golang.org/x/crypto v0.0.0-20210921155107-089bfa567519
 	google.golang.org/grpc v1.39.0
