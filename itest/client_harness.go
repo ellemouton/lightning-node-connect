@@ -62,7 +62,9 @@ func (c *clientHarness) start() error {
 		},
 	)
 
-	transportConn, err := mailbox.NewClient(ctx, connData)
+	transportConn, err := mailbox.NewClient(
+		ctx, c.serverAddr, connData, true,
+	)
 	if err != nil {
 		return err
 	}

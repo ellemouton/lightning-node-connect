@@ -3,16 +3,23 @@ package mailbox
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net"
 	"sync"
+
+	"github.com/lightninglabs/lightning-node-connect/hashmailrpc"
+	"google.golang.org/grpc"
 )
 
 // Client manages the mailboxConn it holds and refreshes it on connection
 // retries.
 type Client struct {
+	serverHost string
+	connData   *ConnData
+
 	mailboxConn *ClientConn
 
-	connData *ConnData
+	grpcClient hashmailrpc.HashMailClient
 
 	status   ClientStatus
 	statusMu sync.Mutex
@@ -24,17 +31,32 @@ type Client struct {
 
 // NewClient creates a new Client object which will handle the mailbox
 // connection.
-func NewClient(ctx context.Context, connData *ConnData) (*Client, error) {
+func NewClient(ctx context.Context, serverHost string, connData *ConnData,
+	withWebSockets bool, dialOpts ...grpc.DialOption) (*Client, error) {
+
+	var client hashmailrpc.HashMailClient
+	if !withWebSockets {
+		mailboxGrpcConn, err := grpc.Dial(serverHost, dialOpts...)
+		if err != nil {
+			return nil, fmt.Errorf("unable to connect to RPC "+
+				"server: %v", err)
+		}
+
+		client = hashmailrpc.NewHashMailClient(mailboxGrpcConn)
+	}
+
 	sid, err := connData.SID()
 	if err != nil {
 		return nil, err
 	}
 
 	return &Client{
-		ctx:      ctx,
-		connData: connData,
-		status:   ClientStatusNotConnected,
-		sid:      sid,
+		ctx:        ctx,
+		serverHost: serverHost,
+		connData:   connData,
+		grpcClient: client,
+		status:     ClientStatusNotConnected,
+		sid:        sid,
 	}, nil
 }
 
@@ -42,7 +64,7 @@ func NewClient(ctx context.Context, connData *ConnData) (*Client, error) {
 // called everytime grpc retries the connection. If this is the first
 // connection, a new ClientConn will be created. Otherwise, the existing
 // connection will just be refreshed.
-func (c *Client) Dial(_ context.Context, serverHost string) (net.Conn, error) {
+func (c *Client) Dial(_ context.Context, _ string) (net.Conn, error) {
 	// If there is currently an active connection, block here until the
 	// previous connection as been closed.
 	if c.mailboxConn != nil {
@@ -73,7 +95,8 @@ func (c *Client) Dial(_ context.Context, serverHost string) (net.Conn, error) {
 
 	if c.mailboxConn == nil {
 		mailboxConn, err := NewClientConn(
-			c.ctx, c.sid, serverHost, func(status ClientStatus) {
+			c.ctx, c.sid, c.serverHost, c.grpcClient,
+			func(status ClientStatus) {
 				c.statusMu.Lock()
 				c.status = status
 				c.statusMu.Unlock()

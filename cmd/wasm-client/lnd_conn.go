@@ -30,7 +30,9 @@ func mailboxRPCConnection(mailboxServer, pairingPhrase string,
 	)
 
 	ctx := context.Background()
-	transportConn, err := mailbox.NewClient(ctx, connData)
+	transportConn, err := mailbox.NewClient(
+		ctx, mailboxServer, connData, true,
+	)
 	if err != nil {
 		return nil, nil, err
 	}
