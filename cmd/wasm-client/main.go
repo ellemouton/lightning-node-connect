@@ -18,23 +18,12 @@ import (
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/golang/protobuf/proto"
 	"github.com/jessevdk/go-flags"
-	"github.com/lightninglabs/faraday/frdrpc"
-	"github.com/lightninglabs/lightning-node-connect/core"
 	"github.com/lightninglabs/lightning-node-connect/mailbox"
-	"github.com/lightninglabs/loop/looprpc"
-	"github.com/lightninglabs/pool/poolrpc"
+	"github.com/lightninglabs/lightning-terminal/litclient"
+	"github.com/lightninglabs/lightning-terminal/perms"
 	"github.com/lightningnetwork/lnd/build"
 	"github.com/lightningnetwork/lnd/keychain"
 	"github.com/lightningnetwork/lnd/lnrpc"
-	"github.com/lightningnetwork/lnd/lnrpc/autopilotrpc"
-	"github.com/lightningnetwork/lnd/lnrpc/chainrpc"
-	"github.com/lightningnetwork/lnd/lnrpc/invoicesrpc"
-	"github.com/lightningnetwork/lnd/lnrpc/routerrpc"
-	"github.com/lightningnetwork/lnd/lnrpc/signrpc"
-	"github.com/lightningnetwork/lnd/lnrpc/verrpc"
-	"github.com/lightningnetwork/lnd/lnrpc/walletrpc"
-	"github.com/lightningnetwork/lnd/lnrpc/watchtowerrpc"
-	"github.com/lightningnetwork/lnd/lnrpc/wtclientrpc"
 	"github.com/lightningnetwork/lnd/macaroons"
 	"github.com/lightningnetwork/lnd/signal"
 	"google.golang.org/grpc"
@@ -43,28 +32,8 @@ import (
 	"gopkg.in/macaroon.v2"
 )
 
-type stubPackageRegistration func(map[string]func(context.Context,
-	*grpc.ClientConn, string, func(string, error)))
-
 var (
-	registrations = []stubPackageRegistration{
-		lnrpc.RegisterLightningJSONCallbacks,
-		lnrpc.RegisterStateJSONCallbacks,
-		autopilotrpc.RegisterAutopilotJSONCallbacks,
-		chainrpc.RegisterChainNotifierJSONCallbacks,
-		invoicesrpc.RegisterInvoicesJSONCallbacks,
-		routerrpc.RegisterRouterJSONCallbacks,
-		signrpc.RegisterSignerJSONCallbacks,
-		verrpc.RegisterVersionerJSONCallbacks,
-		walletrpc.RegisterWalletKitJSONCallbacks,
-		watchtowerrpc.RegisterWatchtowerJSONCallbacks,
-		wtclientrpc.RegisterWatchtowerClientJSONCallbacks,
-		looprpc.RegisterSwapClientJSONCallbacks,
-		poolrpc.RegisterTraderJSONCallbacks,
-		frdrpc.RegisterFaradayServerJSONCallbacks,
-	}
-
-	perms = core.GetAllMethodPermissions()
+	permsMgr *perms.Manager
 
 	jsonCBRegex = regexp.MustCompile("(\\w+)\\.(\\w+)\\.(\\w+)")
 )
@@ -123,7 +92,7 @@ func main() {
 	callbacks.Set("wasmClientIsCustom", js.FuncOf(wc.IsCustom))
 	js.Global().Set(cfg.NameSpace, callbacks)
 
-	for _, registration := range registrations {
+	for _, registration := range litclient.Registrations {
 		registration(wc.registry)
 	}
 
@@ -399,7 +368,7 @@ func (w *wasmClient) HasPermissions(_ js.Value, args []js.Value) interface{} {
 	// first `/` back to a `.` and then we prepend the result with a `/`.
 	uri := jsonCBRegex.ReplaceAllString(args[0].String(), "/$1.$2/$3")
 
-	ops, ok := perms[uri]
+	ops, ok := permsMgr.URIPermissions(uri)
 	if !ok {
 		log.Errorf("uri %s not found in known permissions list", uri)
 		return js.ValueOf(false)
@@ -595,4 +564,12 @@ func exit(err error) {
 	// been initialised since this would result in a panic.
 	fmt.Printf("Error running wasm client: %v\n", err)
 	os.Exit(1)
+}
+
+func init() {
+	var err error
+	permsMgr, err = perms.NewManager(true)
+	if err != nil {
+		exit(err)
+	}
 }
