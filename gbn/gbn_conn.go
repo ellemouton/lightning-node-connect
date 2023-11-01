@@ -335,6 +335,8 @@ func (g *GoBackNConn) Close() error {
 		// initialisation.
 		g.cancel()
 
+		g.sendQueue.stop()
+
 		g.wg.Wait()
 
 		if g.pingTicker != nil {
@@ -374,7 +376,17 @@ func (g *GoBackNConn) sendPacket(ctx context.Context, msg Message) error {
 func (g *GoBackNConn) sendPacketsForever() error {
 	// resendQueue re-sends the current contents of the queue.
 	resendQueue := func() error {
-		return g.sendQueue.resend()
+		err := g.sendQueue.resend()
+
+		// After resending the queue, we reset the resend ticker.
+		// This is so that we don't immediately resend the queue again,
+		// if the sendQueue.resend call above took a long time to
+		// execute. That can happen if the function was awaiting the
+		// expected ACK for a long time, or times out while awaiting the
+		// catch up.
+		g.resendTicker.Reset(g.cfg.resendTimeout)
+
+		return err
 	}
 
 	for {
@@ -564,6 +576,7 @@ func (g *GoBackNConn) receivePacketsForever() error { // nolint:gocyclo
 
 		case *PacketACK:
 			gotValidACK := g.sendQueue.processACK(m.Seq)
+
 			if gotValidACK {
 				g.resendTicker.Reset(g.cfg.resendTimeout)
 
@@ -582,15 +595,12 @@ func (g *GoBackNConn) receivePacketsForever() error { // nolint:gocyclo
 			// sent was dropped, or maybe we sent a duplicate
 			// message. The NACK message contains the sequence
 			// number that the receiver was expecting.
-			inQueue, bumped := g.sendQueue.processNACK(m.Seq)
+			shouldResend, bumped := g.sendQueue.processNACK(m.Seq)
 
-			// If the NACK sequence number is not in our queue
-			// then we ignore it. We must have received the ACK
-			// for the sequence number in the meantime.
-			if !inQueue {
-				g.log.Tracef("NACK seq %d is not in the "+
-					"queue. Ignoring", m.Seq)
-
+			// If we don't need to resend the queue after processing
+			// the NACK, we can continue without sending the resend
+			// signal.
+			if !shouldResend {
 				continue
 			}
 
