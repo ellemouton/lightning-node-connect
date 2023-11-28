@@ -409,6 +409,8 @@ func (q *queue) processNACK(seq uint8) (bool, bool) {
 
 	q.cfg.log.Tracef("Received NACK %d", seq)
 
+	bumped := false
+
 	if q.awaitingCatchUp && seq == q.awaitedNACK {
 		q.cfg.log.Tracef("Sending awaitedNACKSignal")
 		q.awaitedNACKSignal <- struct{}{}
@@ -418,13 +420,15 @@ func (q *queue) processNACK(seq uint8) (bool, bool) {
 		// In case the awaitedNACK is the same as sequenceTop, we can
 		// bump the base to be equal to sequenceTop, without triggering
 		// a new resend.
-		if seq == q.sequenceTop {
+		if seq == q.sequenceTop && q.sequenceBase != q.sequenceTop {
 			q.sequenceBase = q.sequenceTop
+
+			bumped = true
 		}
 
 		// If we receive the awaited NACK, we shouldn't trigger a new
 		// resend, as we can now proceed to send new packets.
-		return false, false
+		return false, bumped
 	}
 
 	// If the NACK is the same as sequenceTop, and we weren't awaiting this
@@ -433,9 +437,14 @@ func (q *queue) processNACK(seq uint8) (bool, bool) {
 	// can empty the queue here by bumping the base and we don't need to
 	// trigger a resend.
 	if seq == q.sequenceTop {
-		q.sequenceBase = q.sequenceTop
+		// Bump the base if it's not already equal to sequenceTop.
+		if q.sequenceBase != q.sequenceTop {
+			q.sequenceBase = q.sequenceTop
 
-		return false, false
+			bumped = true
+		}
+
+		return false, bumped
 	}
 
 	// Is the NACKed sequence even in our queue?
@@ -448,7 +457,6 @@ func (q *queue) processNACK(seq uint8) (bool, bool) {
 
 	// The NACK sequence is in the queue. So we bump the
 	// base to be whatever the sequence is.
-	bumped := false
 	if q.sequenceBase != seq {
 		bumped = true
 	}
