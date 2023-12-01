@@ -28,9 +28,13 @@ var tickers = []struct {
 // same principle behaviors when accessed via the ticker.Ticker interface
 // methods.
 func TestInterfaceTickers(t *testing.T) {
+	t.Parallel()
+
 	for _, test := range tickers {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
 			testTicker(t, test.ticker)
 		})
 	}

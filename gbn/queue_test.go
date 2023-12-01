@@ -7,6 +7,8 @@ import (
 )
 
 func TestQueueSize(t *testing.T) {
+	t.Parallel()
+
 	q := newQueue(&queueCfg{s: 4})
 
 	require.Equal(t, uint8(0), q.size())
