@@ -2,6 +2,7 @@ package gbn
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"time"
 )
@@ -12,7 +13,7 @@ import (
 // The resendTimeout parameter defines the duration to wait before resending data
 // if the corresponding ACK for the data is not received.
 func NewServerConn(ctx context.Context, sendFunc sendBytesFunc,
-	recvFunc recvBytesFunc, opts ...Option) (*GoBackNConn, error) {
+	recvFunc recvBytesFunc, opts ...Option) (GBN, error) {
 
 	cfg := newConfig(sendFunc, recvFunc, DefaultN)
 
@@ -21,7 +22,7 @@ func NewServerConn(ctx context.Context, sendFunc sendBytesFunc,
 		o(cfg)
 	}
 
-	conn := newGoBackNConn(ctx, cfg, "server")
+	conn := newGBN(ctx, cfg, "server")
 
 	if err := conn.serverHandshake(); err != nil {
 		if err := conn.Close(); err != nil {
@@ -30,6 +31,7 @@ func NewServerConn(ctx context.Context, sendFunc sendBytesFunc,
 
 		return nil, err
 	}
+
 	conn.start()
 
 	return conn, nil
@@ -44,7 +46,7 @@ func NewServerConn(ctx context.Context, sendFunc sendBytesFunc,
 // handshake is considered complete.
 // 4b. If SYNACK is not received before a certain resendTimeout, then the
 // handshake is aborted and the process is started from step 1 again.
-func (g *GoBackNConn) serverHandshake() error { // nolint:gocyclo
+func (g *gbn) serverHandshake() error { // nolint:gocyclo
 	recvChan := make(chan []byte)
 	recvNext := make(chan int, 1)
 	errChan := make(chan error, 1)
@@ -111,6 +113,7 @@ func (g *GoBackNConn) serverHandshake() error { // nolint:gocyclo
 		switch msg.(type) {
 		case *PacketSYN:
 		default:
+			fmt.Printf("got something else %T\n", msg)
 			g.log.Tracef("Expected SYN, got %T", msg)
 			continue
 		}

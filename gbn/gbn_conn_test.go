@@ -152,7 +152,7 @@ func TestServerHandshakeTimeout(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	var (
-		server *GoBackNConn
+		server GBN
 		wg     sync.WaitGroup
 	)
 	defer func() {
@@ -189,6 +189,7 @@ func TestServerHandshakeTimeout(t *testing.T) {
 
 	cancel()
 	wg.Wait()
+
 }
 
 func TestDroppedMessage(t *testing.T) {
@@ -1211,12 +1212,12 @@ func TestPayloadSplitting(t *testing.T) {
 func setUpClientServerConns(t *testing.T, n uint8,
 	cRead, sRead func(ctx context.Context) ([]byte, error),
 	cWrite, sWrite func(ctx context.Context, b []byte) error,
-	opts ...Option) (*GoBackNConn, *GoBackNConn, func()) {
+	opts ...Option) (GBN, GBN, func()) {
 
 	t.Helper()
 
 	var (
-		server *GoBackNConn
+		server GBN
 		err    error
 		wg     sync.WaitGroup
 	)

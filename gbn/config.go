@@ -10,15 +10,6 @@ type config struct {
 	// GoBN handshake.
 	n uint8
 
-	// s is the maximum sequence number used to label packets. Packets
-	// are labelled with incrementing sequence numbers modulo s.
-	// s must be strictly larger than the window size, n. This
-	// is so that the receiver can tell if the sender is resending the
-	// previous window (maybe the sender did not receive the acks) or if
-	// they are sending the next window. If s <= n then there would be
-	// no way to tell.
-	s uint8
-
 	// maxChunkSize is the maximum payload size in bytes allowed per
 	// message. If the payload to be sent is larger than maxChunkSize then
 	// the payload will be split between multiple packets.
@@ -53,7 +44,6 @@ func newConfig(sendFunc sendBytesFunc, recvFunc recvBytesFunc,
 
 	return &config{
 		n:                n,
-		s:                n + 1,
 		recvFromStream:   recvFunc,
 		sendToStream:     sendFunc,
 		resendTimeout:    defaultResendTimeout,

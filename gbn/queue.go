@@ -21,7 +21,7 @@ type queueCfg struct {
 
 	log btclog.Logger
 
-	sendPkt func(packet *PacketData) error
+	sendPkt func(Message) error
 }
 
 // queue is a fixed size queue with a sliding window that has a base and a top

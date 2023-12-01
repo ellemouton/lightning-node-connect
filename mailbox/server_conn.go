@@ -41,7 +41,7 @@ type ServerConn struct {
 
 	client hashmailrpc.HashMailClient
 
-	gbnConn    *gbn.GoBackNConn
+	gbnConn    gbn.GBN
 	gbnOptions []gbn.Option
 
 	receiveBoxCreated bool

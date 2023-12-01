@@ -115,7 +115,7 @@ type ClientConn struct {
 	receiveMu sync.Mutex
 	sendMu    sync.Mutex
 
-	gbnConn    *gbn.GoBackNConn
+	gbnConn    gbn.GBN
 	gbnOptions []gbn.Option
 
 	status      ClientStatus
