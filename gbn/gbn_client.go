@@ -14,7 +14,7 @@ import (
 // The resendTimeout parameter defines the duration to wait before resending data
 // if the corresponding ACK for the data is not received.
 func NewClientConn(ctx context.Context, n uint8, sendFunc sendBytesFunc,
-	receiveFunc recvBytesFunc, opts ...Option) (*GoBackNConn, error) {
+	receiveFunc recvBytesFunc, opts ...Option) (GBN, error) {
 
 	if n == math.MaxUint8 {
 		return nil, fmt.Errorf("n must be smaller than %d",
@@ -28,7 +28,7 @@ func NewClientConn(ctx context.Context, n uint8, sendFunc sendBytesFunc,
 		o(cfg)
 	}
 
-	conn := newGoBackNConn(ctx, cfg, "client")
+	conn := newGBN(ctx, cfg, "client")
 
 	if err := conn.clientHandshake(); err != nil {
 		if err := conn.Close(); err != nil {
@@ -36,6 +36,7 @@ func NewClientConn(ctx context.Context, n uint8, sendFunc sendBytesFunc,
 		}
 		return nil, err
 	}
+
 	conn.start()
 
 	return conn, nil
@@ -50,7 +51,7 @@ func NewClientConn(ctx context.Context, n uint8, sendFunc sendBytesFunc,
 // SYNACK.
 // 3b. If the client does not receive SYN from the server within a given
 // timeout, then the client restarts the handshake from step 1.
-func (g *GoBackNConn) clientHandshake() error {
+func (g *gbn) clientHandshake() error {
 	// Spin off the recv function in a goroutine so that we can use
 	// a select to choose to timeout waiting for data from the receive
 	// stream. This is needed instead of a context timeout because the

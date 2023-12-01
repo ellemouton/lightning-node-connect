@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"math"
 	"sync"
 	"time"
 
@@ -25,275 +23,238 @@ const (
 	defaultHandshakeTimeout = 100 * time.Millisecond
 	defaultResendTimeout    = 100 * time.Millisecond
 	finSendTimeout          = 1000 * time.Millisecond
-	DefaultSendTimeout      = math.MaxInt64
-	DefaultRecvTimeout      = math.MaxInt64
 )
 
 type sendBytesFunc func(ctx context.Context, b []byte) error
 type recvBytesFunc func(ctx context.Context) ([]byte, error)
 
-type GoBackNConn struct {
+type GBN interface {
+	Send([]byte) error
+	Recv() ([]byte, error)
+	SetRecvTimeout(timeout time.Duration)
+	SetSendTimeout(timeout time.Duration)
+	Close() error
+}
+
+type gbn struct {
 	cfg *config
 
-	sendQueue *queue
-
-	// recvSeq keeps track of the latest, correctly sequenced packet
-	// sequence that we have received.
-	recvSeq uint8
-
-	resendTicker *time.Ticker
-
-	recvDataChan chan *PacketData
-	sendDataChan chan *PacketData
-
-	sendTimeout time.Duration
-	recvTimeout time.Duration
-	timeoutsMu  sync.RWMutex
-
-	log btclog.Logger
-
-	// receivedACKSignal channel is used to signal that the queue size has
-	// been decreased.
-	receivedACKSignal chan struct{}
-
-	// resendSignal is used to signal that normal operation sending should
-	// stop and the current queue contents should first be resent. Note
-	// that this channel should only be listened on in one place.
-	resendSignal chan struct{}
-
-	pingTicker *IntervalAwareForceTicker
-	pongTicker *IntervalAwareForceTicker
+	// s is the maximum sequence number used to label packets. Packets
+	// are labelled with incrementing sequence numbers modulo s.
+	// s must be strictly larger than the window size, n. This
+	// is so that the receiver can tell if the sender is resending the
+	// previous window (maybe the sender did not receive the acks) or if
+	// they are sending the next window. If s <= n then there would be
+	// no way to tell.
+	s uint8
 
 	ctx    context.Context //nolint:containedctx
 	cancel func()
 
+	sender      *sender
+	senderErr   chan error
+	receiver    *receiver
+	receiverErr chan error
+
 	// remoteClosed is closed if the remote party initiated the FIN sequence.
 	remoteClosed chan struct{}
 
-	// quit is used to stop the normal operations of the connection.
-	// Once closed, the send and receive streams will still be available
-	// for the FIN sequence.
+	log btclog.Logger
+
 	quit      chan struct{}
 	closeOnce sync.Once
 	wg        sync.WaitGroup
+	errChan   chan error
 }
 
-// newGoBackNConn creates a GoBackNConn instance with all the members which
-// are common between client and server initialised.
-func newGoBackNConn(ctx context.Context, cfg *config,
-	loggerPrefix string) *GoBackNConn {
-
+func newGBN(ctx context.Context, cfg *config, loggerPrefix string) *gbn {
 	ctxc, cancel := context.WithCancel(ctx)
 
 	// Construct a new prefixed logger.
 	prefix := fmt.Sprintf("(%s)", loggerPrefix)
 	plog := build.NewPrefixLog(prefix, log)
 
-	return &GoBackNConn{
+	senderErr := make(chan error, 1)
+	receiverErr := make(chan error, 1)
+
+	g := &gbn{
 		cfg:          cfg,
-		recvDataChan: make(chan *PacketData, cfg.n),
-		sendDataChan: make(chan *PacketData),
-		sendQueue: newQueue(
-			cfg.n+1, defaultHandshakeTimeout, plog,
-		),
-		recvTimeout:       DefaultRecvTimeout,
-		sendTimeout:       DefaultSendTimeout,
-		receivedACKSignal: make(chan struct{}),
-		resendSignal:      make(chan struct{}, 1),
-		remoteClosed:      make(chan struct{}),
-		ctx:               ctxc,
-		cancel:            cancel,
-		log:               plog,
-		quit:              make(chan struct{}),
-	}
-}
-
-// setN sets the current N to use. This _must_ be set before the handshake is
-// completed.
-func (g *GoBackNConn) setN(n uint8) {
-	g.cfg.n = n
-	g.cfg.s = n + 1
-	g.recvDataChan = make(chan *PacketData, n)
-	g.sendQueue = newQueue(n+1, defaultHandshakeTimeout, g.log)
-}
-
-// SetSendTimeout sets the timeout used in the Send function.
-func (g *GoBackNConn) SetSendTimeout(timeout time.Duration) {
-	g.timeoutsMu.Lock()
-	defer g.timeoutsMu.Unlock()
-
-	g.sendTimeout = timeout
-}
-
-// SetRecvTimeout sets the timeout used in the Recv function.
-func (g *GoBackNConn) SetRecvTimeout(timeout time.Duration) {
-	g.timeoutsMu.Lock()
-	defer g.timeoutsMu.Unlock()
-
-	g.recvTimeout = timeout
-}
-
-// Send blocks until an ack is received for the packet sent N packets before.
-func (g *GoBackNConn) Send(data []byte) error {
-	// Wait for handshake to complete before we can send data.
-	select {
-	case <-g.quit:
-		return io.EOF
-	default:
+		ctx:          ctxc,
+		cancel:       cancel,
+		log:          plog,
+		senderErr:    senderErr,
+		receiverErr:  receiverErr,
+		remoteClosed: make(chan struct{}),
+		errChan:      make(chan error, 1),
+		quit:         make(chan struct{}),
 	}
 
-	g.timeoutsMu.RLock()
-	ticker := time.NewTimer(g.sendTimeout)
-	g.timeoutsMu.RUnlock()
-	defer ticker.Stop()
-
-	sendPacket := func(packet *PacketData) error {
-		select {
-		case g.sendDataChan <- packet:
-			return nil
-		case <-ticker.C:
-			return errSendTimeout
-		case <-g.quit:
-			return fmt.Errorf("cannot send, gbn exited")
-		}
-	}
-
-	if g.cfg.maxChunkSize == 0 {
-		// Splitting is disabled.
-		return sendPacket(&PacketData{
-			Payload:    data,
-			FinalChunk: true,
-		})
-	}
-
-	// Splitting is enabled. Split into packets no larger than maxChunkSize.
-	var (
-		sentBytes = 0
-		maxChunk  = g.cfg.maxChunkSize
+	g.sender = newSender(
+		cfg.n, g.sendPacket, senderErr, plog, cfg.resendTimeout,
 	)
-	for sentBytes < len(data) {
-		packet := &PacketData{}
 
-		remainingBytes := len(data) - sentBytes
-		if remainingBytes <= maxChunk {
-			packet.Payload = data[sentBytes:]
-			sentBytes += remainingBytes
-			packet.FinalChunk = true
-		} else {
-			packet.Payload = data[sentBytes : sentBytes+maxChunk]
-			sentBytes += maxChunk
+	g.receiver = newReceiver(
+		cfg.n+1, g.sendPacket, receiverErr, cfg.resendTimeout, plog,
+	)
+
+	return g
+}
+
+func (g *gbn) setN(n uint8) {
+	g.cfg.n = n
+	g.s = n + 1
+	g.sender = newSender(
+		g.cfg.n, g.sendPacket, g.senderErr, g.log, g.cfg.resendTimeout,
+	)
+	g.receiver = newReceiver(
+		g.cfg.n+1, g.sendPacket, g.receiverErr, g.cfg.resendTimeout,
+		g.log,
+	)
+}
+
+func (g *gbn) Send(data []byte) error {
+	return g.sender.Send(data)
+}
+
+func (g *gbn) Recv() ([]byte, error) {
+	return g.receiver.Receive()
+}
+
+// start kicks off the various goroutines needed by GoBackNConn.
+// start should only be called once the handshake has been completed.
+func (g *gbn) start() {
+	g.log.Debugf("Starting")
+
+	g.wg.Add(1)
+	go g.packetDistributor()
+
+	g.sender.start()
+	g.receiver.start()
+
+	go func() {
+		var (
+			err         error
+			errProducer string
+		)
+
+		select {
+		case <-g.senderErr:
+			errProducer = "sender"
+		case <-g.receiverErr:
+			errProducer = "receiver"
+		case <-g.errChan:
+			errProducer = "gbn"
+		case <-g.quit:
+			return
 		}
 
-		if err := sendPacket(packet); err != nil {
-			return err
+		g.log.Errorf("Error from %s: %v", errProducer, err)
+
+		if err := g.Close(); err != nil {
+			g.log.Errorf("Error closing gbn: %v", err)
 		}
+	}()
+}
+
+func (g *gbn) receivePacket() (Message, error) {
+	b, err := g.cfg.recvFromStream(g.ctx)
+	if err != nil {
+		return nil, fmt.Errorf("error receiving from stream: %w", err)
+	}
+
+	m, err := Deserialize(b)
+	if err != nil {
+		return nil, err
+	}
+
+	g.sender.AnyReceive()
+
+	return m, nil
+}
+
+func (g *gbn) sendPacket(msg Message) error {
+	b, err := msg.Serialize()
+	if err != nil {
+		return fmt.Errorf("serialize error: %s", err)
+	}
+
+	err = g.cfg.sendToStream(g.ctx, b)
+	if err != nil {
+		return fmt.Errorf("error calling sendToStream: %s", err)
 	}
 
 	return nil
 }
 
-// Recv blocks until it gets a recv with the correct sequence it was expecting.
-func (g *GoBackNConn) Recv() ([]byte, error) {
-	// Wait for handshake to complete
-	select {
-	case <-g.quit:
-		return nil, io.EOF
-	default:
+func (g *gbn) sendPacketWithCtx(ctx context.Context, msg Message) error {
+	b, err := msg.Serialize()
+	if err != nil {
+		return fmt.Errorf("serialize error: %s", err)
 	}
 
-	var (
-		b   []byte
-		msg *PacketData
-	)
+	err = g.cfg.sendToStream(ctx, b)
+	if err != nil {
+		return fmt.Errorf("error calling sendToStream: %s", err)
+	}
 
-	g.timeoutsMu.RLock()
-	ticker := time.NewTimer(g.recvTimeout)
-	g.timeoutsMu.RUnlock()
-	defer ticker.Stop()
+	return nil
+}
+
+func (g *gbn) packetDistributor() {
+	defer g.wg.Done()
 
 	for {
 		select {
 		case <-g.quit:
-			return nil, fmt.Errorf("cannot receive, gbn exited")
-		case <-ticker.C:
-			return nil, errRecvTimeout
-		case msg = <-g.recvDataChan:
+			return
+		default:
 		}
 
-		b = append(b, msg.Payload...)
+		msg, err := g.receivePacket()
+		if err != nil {
+			g.errChan <- fmt.Errorf("deserialize error: %s", err)
 
-		if msg.FinalChunk {
-			break
+			return
+		}
+
+		switch m := msg.(type) {
+		case *PacketData:
+			// Send DATA packets to the receiver.
+			g.receiver.GotData(m)
+
+		case *PacketACK:
+			// ACKs go to the sender.
+			g.sender.ACK(m.Seq)
+
+		case *PacketNACK:
+			// NACKs go to the sender.
+			g.sender.NACK(m.Seq)
+
+		case *PacketFIN:
+			// A FIN packet indicates that the peer would like to
+			// close the connection.
+			g.log.Tracef("Received a FIN packet")
+
+			close(g.remoteClosed)
+			g.errChan <- errTransportClosing
+
+		default:
+			g.errChan <- fmt.Errorf("received unhandled message: "+
+				"%T", msg)
+
+			return
 		}
 	}
-
-	return b, nil
 }
 
-// start kicks off the various goroutines needed by GoBackNConn.
-// start should only be called once the handshake has been completed.
-func (g *GoBackNConn) start() {
-	g.log.Debugf("Starting")
-
-	pingTime := time.Duration(math.MaxInt64)
-	if g.cfg.pingTime != 0 {
-		pingTime = g.cfg.pingTime
-	}
-
-	g.pingTicker = NewIntervalAwareForceTicker(pingTime)
-	g.pingTicker.Resume()
-
-	pongTime := time.Duration(math.MaxInt64)
-	if g.cfg.pongTime != 0 {
-		pongTime = g.cfg.pongTime
-	}
-
-	g.pongTicker = NewIntervalAwareForceTicker(pongTime)
-
-	g.resendTicker = time.NewTicker(g.cfg.resendTimeout)
-
-	g.wg.Add(1)
-	go func() {
-		defer func() {
-			g.wg.Done()
-			if err := g.Close(); err != nil {
-				g.log.Errorf("Error closing GoBackNConn: %v",
-					err)
-			}
-		}()
-
-		err := g.receivePacketsForever()
-		if err != nil {
-			g.log.Debugf("Error in receivePacketsForever: %v", err)
-		}
-
-		g.log.Debugf("receivePacketsForever stopped")
-	}()
-
-	g.wg.Add(1)
-	go func() {
-		defer func() {
-			g.wg.Done()
-			if err := g.Close(); err != nil {
-				g.log.Errorf("Error closing GoBackNConn: %v",
-					err)
-			}
-		}()
-
-		err := g.sendPacketsForever()
-		if err != nil {
-			g.log.Debugf("Error in sendPacketsForever: %v", err)
-
-		}
-
-		g.log.Debugf("sendPacketsForever stopped")
-	}()
-}
-
-// Close attempts to cleanly close the connection by sending a FIN message.
-func (g *GoBackNConn) Close() error {
+func (g *gbn) Close() error {
 	g.closeOnce.Do(func() {
-		g.log.Debugf("Closing GoBackNConn")
+		g.log.Debugf("Closing GBN")
+
+		// Canceling the context will ensure that we are not hanging on
+		// the receive or send functions passed to the server on
+		// initialisation.
+		g.cancel()
 
 		// We close the quit channel to stop the usual operations of the
 		// server.
@@ -310,24 +271,17 @@ func (g *GoBackNConn) Close() error {
 				g.ctx, finSendTimeout,
 			)
 			defer cancel()
-			if err := g.sendPacket(ctxc, &PacketFIN{}); err != nil {
+
+			err := g.sendPacketWithCtx(ctxc, &PacketFIN{})
+			if err != nil {
 				g.log.Errorf("Error sending FIN: %v", err)
 			}
 		}
 
-		// Canceling the context will ensure that we are not hanging on
-		// the receive or send functions passed to the server on
-		// initialisation.
-		g.cancel()
+		g.receiver.stop()
+		g.sender.stop()
 
 		g.wg.Wait()
-
-		if g.pingTicker != nil {
-			g.pingTicker.Stop()
-		}
-		if g.resendTicker != nil {
-			g.resendTicker.Stop()
-		}
 
 		g.log.Debugf("GBN is closed")
 	})
@@ -335,282 +289,12 @@ func (g *GoBackNConn) Close() error {
 	return nil
 }
 
-// sendPacket serializes a message and writes it to the underlying send stream.
-func (g *GoBackNConn) sendPacket(ctx context.Context, msg Message) error {
-	b, err := msg.Serialize()
-	if err != nil {
-		return fmt.Errorf("serialize error: %s", err)
-	}
-
-	err = g.cfg.sendToStream(ctx, b)
-	if err != nil {
-		return fmt.Errorf("error calling sendToStream: %s", err)
-	}
-
-	return nil
+func (g *gbn) SetRecvTimeout(t time.Duration) {
+	g.receiver.SetTimeout(t)
 }
 
-// sendPacketsForever manages the resending logic. It keeps a cache of up to
-// N packets and manages the resending of packets if acks are not received for
-// them or if NACKs are received. It reads new data from sendDataChan only
-// when there is space in the queue.
-//
-// This function must be called in a go routine.
-func (g *GoBackNConn) sendPacketsForever() error {
-	// resendQueue re-sends the current contents of the queue.
-	resendQueue := func() error {
-		return g.sendQueue.resend(func(packet *PacketData) error {
-			return g.sendPacket(g.ctx, packet)
-		})
-	}
-
-	for {
-		// The queue is not empty. If we receive a resend signal
-		// or if the resend timeout passes then we resend the
-		// current contents of the queue. Otherwise, wait for
-		// more data to arrive on sendDataChan.
-		var packet *PacketData
-		select {
-		case <-g.quit:
-			return nil
-
-		case <-g.resendSignal:
-			if err := resendQueue(); err != nil {
-				return err
-			}
-			continue
-
-		case <-g.resendTicker.C:
-			if err := resendQueue(); err != nil {
-				return err
-			}
-			continue
-
-		case <-g.pingTicker.Ticks():
-
-			// Start the pong timer.
-			g.pongTicker.Reset()
-			g.pongTicker.Resume()
-
-			g.log.Tracef("Sending a PING packet")
-
-			packet = &PacketData{
-				IsPing: true,
-			}
-
-		case <-g.pongTicker.Ticks():
-			return errKeepaliveTimeout
-
-		case packet = <-g.sendDataChan:
-		}
-
-		// New data has arrived that we need to add to the queue and
-		// send.
-		g.sendQueue.addPacket(packet)
-
-		g.log.Tracef("Sending data %d", packet.Seq)
-		if err := g.sendPacket(g.ctx, packet); err != nil {
-			return err
-		}
-
-		for {
-			// If the queue size is still less than N, we can
-			// continue to add more packets to the queue.
-			if g.sendQueue.size() < g.cfg.n {
-				break
-			}
-
-			g.log.Tracef("The queue is full.")
-
-			// The queue is full. We wait for a ACKs to arrive or
-			// resend the queue after a timeout.
-			select {
-			case <-g.quit:
-				return nil
-			case <-g.receivedACKSignal:
-				break
-			case <-g.resendSignal:
-				if err := resendQueue(); err != nil {
-					return err
-				}
-			case <-g.resendTicker.C:
-				if err := resendQueue(); err != nil {
-					return err
-				}
-			}
-		}
-	}
+func (g *gbn) SetSendTimeout(t time.Duration) {
+	g.sender.SetTimeout(t)
 }
 
-// receivePacketsForever uses the provided recvFromStream to get new data
-// from the underlying transport. It then checks to see if what was received is
-// data, an ACK, NACK or FIN signal and then processes the packet accordingly.
-//
-// This function must be called in a go routine.
-func (g *GoBackNConn) receivePacketsForever() error { // nolint:gocyclo
-	var (
-		lastNackSeq  uint8
-		lastNackTime time.Time
-	)
-
-	for {
-		select {
-		case <-g.quit:
-			return nil
-		default:
-		}
-
-		b, err := g.cfg.recvFromStream(g.ctx)
-		if err != nil {
-			return fmt.Errorf("error receiving "+
-				"from recvFromStream: %s", err)
-		}
-
-		msg, err := Deserialize(b)
-		if err != nil {
-			return fmt.Errorf("deserialize error: %s", err)
-		}
-
-		// Reset the ping & pong timer if any packet is received.
-		// If ping/pong is disabled, this is a no-op.
-		g.pingTicker.Reset()
-		if g.pongTicker.IsActive() {
-			g.pongTicker.Pause()
-		}
-
-		switch m := msg.(type) {
-		case *PacketData:
-			switch m.Seq == g.recvSeq {
-			case true:
-				// We received a data packet with the sequence
-				// number we were expecting. So we respond with
-				// an ACK message with that sequence number
-				// and we bump the sequence number that we
-				// expect of the next data packet.
-				g.log.Tracef("Got expected data %d", m.Seq)
-
-				ack := &PacketACK{
-					Seq: m.Seq,
-				}
-
-				if err = g.sendPacket(g.ctx, ack); err != nil {
-					return err
-				}
-
-				g.recvSeq = (g.recvSeq + 1) % g.cfg.s
-
-				// If the packet was a ping, then there is no
-				// data to return to the above layer.
-				if m.IsPing {
-					continue
-				}
-
-				// Pass the returned packet to the layer above
-				// GBN.
-				select {
-				case g.recvDataChan <- m:
-				case <-g.quit:
-					return nil
-				}
-
-			case false:
-				// We received a data packet with a sequence
-				// number that we were not expecting. This
-				// could be a packet that we have already
-				// received and that is being resent because
-				// the ACK for it was not received in time or
-				// it could be that we missed a previous packet.
-				// In either case, we send a NACK with the
-				// sequence number that we were expecting.
-				g.log.Tracef("Got unexpected data %d", m.Seq)
-
-				// If we recently sent a NACK for the same
-				// sequence number then back off.
-				if lastNackSeq == g.recvSeq &&
-					time.Since(lastNackTime) <
-						g.cfg.resendTimeout {
-
-					continue
-				}
-
-				g.log.Tracef("Sending NACK %d", g.recvSeq)
-
-				// Send a NACK with the expected sequence
-				// number.
-				nack := &PacketNACK{
-					Seq: g.recvSeq,
-				}
-
-				if err = g.sendPacket(g.ctx, nack); err != nil {
-					return err
-				}
-
-				lastNackTime = time.Now()
-				lastNackSeq = nack.Seq
-			}
-
-		case *PacketACK:
-			gotValidACK := g.sendQueue.processACK(m.Seq)
-			if gotValidACK {
-				g.resendTicker.Reset(g.cfg.resendTimeout)
-
-				// Send a signal to indicate that new
-				// ACKs have been received.
-				select {
-				case g.receivedACKSignal <- struct{}{}:
-				default:
-				}
-			}
-
-		case *PacketNACK:
-			// We received a NACK packet. This means that the
-			// receiver got a data packet that they were not
-			// expecting. This likely means that a packet that we
-			// sent was dropped, or maybe we sent a duplicate
-			// message. The NACK message contains the sequence
-			// number that the receiver was expecting.
-			inQueue, bumped := g.sendQueue.processNACK(m.Seq)
-
-			// If the NACK sequence number is not in our queue
-			// then we ignore it. We must have received the ACK
-			// for the sequence number in the meantime.
-			if !inQueue {
-				g.log.Tracef("NACK seq %d is not in the "+
-					"queue. Ignoring", m.Seq)
-
-				continue
-			}
-
-			// If the base was bumped, then the queue is now smaller
-			// and so we can send a signal to indicate this.
-			if bumped {
-				select {
-				case g.receivedACKSignal <- struct{}{}:
-				default:
-				}
-			}
-
-			g.log.Tracef("Sending a resend signal")
-
-			// Send a signal to indicate that new sends should pause
-			// and the current queue should be resent instead.
-			select {
-			case g.resendSignal <- struct{}{}:
-			default:
-			}
-
-		case *PacketFIN:
-			// A FIN packet indicates that the peer would like to
-			// close the connection.
-			g.log.Tracef("Received a FIN packet")
-
-			close(g.remoteClosed)
-
-			return errTransportClosing
-
-		default:
-			return fmt.Errorf("received unexpected message: %T",
-				msg)
-		}
-	}
-}
+var _ GBN = (*gbn)(nil)

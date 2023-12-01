@@ -12,6 +12,8 @@ import (
 )
 
 func TestNormal(t *testing.T) {
+	t.Parallel()
+
 	s1Chan := make(chan []byte, 10)
 	s2Chan := make(chan []byte, 10)
 
@@ -86,6 +88,8 @@ func TestNormal(t *testing.T) {
 // so will call Recv or Send which will hang indefinitely unless we set a
 // timeout.
 func TestServerHandshakeTimeout(t *testing.T) {
+	t.Parallel()
+
 	s1Chan := make(chan []byte, 10)
 	s2Chan := make(chan []byte, 10)
 
@@ -148,7 +152,7 @@ func TestServerHandshakeTimeout(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	var (
-		server *GoBackNConn
+		server GBN
 		wg     sync.WaitGroup
 	)
 	defer func() {
@@ -185,9 +189,12 @@ func TestServerHandshakeTimeout(t *testing.T) {
 
 	cancel()
 	wg.Wait()
+
 }
 
 func TestDroppedMessage(t *testing.T) {
+	t.Parallel()
+
 	s1Chan := make(chan []byte, 10)
 	s2Chan := make(chan []byte, 10)
 
@@ -268,6 +275,8 @@ func TestDroppedMessage(t *testing.T) {
 }
 
 func TestDroppedACKs(t *testing.T) {
+	t.Parallel()
+
 	s1Chan := make(chan []byte, 10)
 	s2Chan := make(chan []byte, 10)
 
@@ -357,6 +366,8 @@ func TestDroppedACKs(t *testing.T) {
 }
 
 func TestReceiveDuplicateMessages(t *testing.T) {
+	t.Parallel()
+
 	s1Chan := make(chan []byte, 10)
 	s2Chan := make(chan []byte, 10)
 
@@ -438,6 +449,8 @@ func TestReceiveDuplicateMessages(t *testing.T) {
 }
 
 func TestReceiveDuplicateDataAndACKs(t *testing.T) {
+	t.Parallel()
+
 	s1Chan := make(chan []byte, 10)
 	s2Chan := make(chan []byte, 10)
 
@@ -536,6 +549,8 @@ func TestReceiveDuplicateDataAndACKs(t *testing.T) {
 }
 
 func TestBidirectional(t *testing.T) {
+	t.Parallel()
+
 	s1Chan := make(chan []byte, 10)
 	s2Chan := make(chan []byte, 10)
 
@@ -619,6 +634,8 @@ func TestBidirectional(t *testing.T) {
 }
 
 func TestSendNBeforeNeedingAck(t *testing.T) {
+	t.Parallel()
+
 	s1Chan := make(chan []byte, 10)
 	s2Chan := make(chan []byte, 10)
 
@@ -682,6 +699,8 @@ func TestSendNBeforeNeedingAck(t *testing.T) {
 }
 
 func TestDropFirstNPackets(t *testing.T) {
+	t.Parallel()
+
 	s1Chan := make(chan []byte, 10)
 	s2Chan := make(chan []byte, 10)
 
@@ -769,6 +788,8 @@ func TestDropFirstNPackets(t *testing.T) {
 }
 
 func TestBidirectional2(t *testing.T) {
+	t.Parallel()
+
 	s1Chan := make(chan []byte, 10)
 	s2Chan := make(chan []byte, 10)
 
@@ -898,6 +919,8 @@ func TestBidirectional2(t *testing.T) {
 }
 
 func TestSendingIsNonBlockingUpToN(t *testing.T) {
+	t.Parallel()
+
 	s1Chan := make(chan []byte, 10)
 	s2Chan := make(chan []byte, 10)
 
@@ -994,6 +1017,8 @@ func TestSendingIsNonBlockingUpToN(t *testing.T) {
 }
 
 func TestSendingLargeNumberOfMessages(t *testing.T) {
+	t.Parallel()
+
 	s1Chan := make(chan []byte, 10)
 	s2Chan := make(chan []byte, 10)
 
@@ -1066,6 +1091,8 @@ func TestSendingLargeNumberOfMessages(t *testing.T) {
 }
 
 func TestResendAfterTimeout(t *testing.T) {
+	t.Parallel()
+
 	s1Chan := make(chan []byte, 10)
 	s2Chan := make(chan []byte, 10)
 
@@ -1121,6 +1148,8 @@ func TestResendAfterTimeout(t *testing.T) {
 }
 
 func TestPayloadSplitting(t *testing.T) {
+	t.Parallel()
+
 	s1Chan := make(chan []byte, 10)
 	s2Chan := make(chan []byte, 10)
 
@@ -1183,10 +1212,12 @@ func TestPayloadSplitting(t *testing.T) {
 func setUpClientServerConns(t *testing.T, n uint8,
 	cRead, sRead func(ctx context.Context) ([]byte, error),
 	cWrite, sWrite func(ctx context.Context, b []byte) error,
-	opts ...Option) (*GoBackNConn, *GoBackNConn, func()) {
+	opts ...Option) (GBN, GBN, func()) {
+
+	t.Helper()
 
 	var (
-		server *GoBackNConn
+		server GBN
 		err    error
 		wg     sync.WaitGroup
 	)
