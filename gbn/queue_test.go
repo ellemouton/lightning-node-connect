@@ -1,7 +1,6 @@
 package gbn
 
 import (
-	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -142,15 +141,8 @@ func resend(t *testing.T, q *queue, wg *sync.WaitGroup) {
 
 	// We also ensure that the above goroutine is has started the resend
 	// before this function returns.
-	err := wait.NoError(func() error {
-		q.awaitingCatchUpMu.Lock()
-		defer q.awaitingCatchUpMu.Unlock()
-
-		if !q.awaitingCatchUp {
-			return errors.New("Hasn't resent yet")
-		}
-
-		return nil
+	err := wait.Predicate(func() bool {
+		return q.syncer.getState() == syncStateWaiting
 	}, time.Second)
 	require.NoError(t, err)
 }
